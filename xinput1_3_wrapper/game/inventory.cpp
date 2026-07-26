@@ -5,6 +5,7 @@
 #include "overlay.h"
 #include <vector>
 #include <string>
+#include <map>
 
 using infra::Engine;
 using infra::CMathCounter;
@@ -177,4 +178,196 @@ void mod::inventory::MapLoaded(const char *name) {
 			osCoinsCounter = &mathCounter->m_CounterValue;
 		}
 	}
+}
+
+// ----- Novelty pickup counter + status lines -----
+namespace {
+	int g_PickupCount = 0;
+	unsigned int g_LastHeldIdx = 0xFFFFFFFF;
+	int g_LastFlashBatt = -1;
+	int g_LastCamBatt = -1;
+	int g_LastCoins = -1;
+	unsigned int g_LastDocIdx = 0xFFFFFFFF;
+	std::map<std::string, std::string> g_PickupNames;   // lowercased key -> friendly
+
+	// End-report stats (accumulated across the session, like the run timer).
+	int g_TotalPickups = 0;                             // every distinct held grab
+	std::map<std::string, int> g_PickupTally;           // key -> times grabbed
+	unsigned long long g_ReadingElapsedMs = 0;          // time with a document open
+	unsigned long long g_ReadingLastTick = 0;
+
+	std::string ToLowerStr(const std::string& s) {
+		std::string r; r.reserve(s.size());
+		for (size_t i = 0; i < s.size(); ++i) r += static_cast<char>(tolower(static_cast<unsigned char>(s[i])));
+		return r;
+	}
+
+	bool ContainsCI(const std::string& hay, const std::string& needle) {
+		if (needle.empty() || hay.empty()) return false;
+		std::string h, n;
+		for (size_t i = 0; i < hay.size(); ++i) h += static_cast<char>(tolower(static_cast<unsigned char>(hay[i])));
+		for (size_t i = 0; i < needle.size(); ++i) n += static_cast<char>(tolower(static_cast<unsigned char>(needle[i])));
+		return h.find(n) != std::string::npos;
+	}
+}
+
+void mod::inventory::PickupTick() {
+	// 1) Held objects (props grabbed with E): log every change with the entity's
+	//    name, model, and handle index; map to a friendly name if configured.
+	unsigned int idx = 0xFFFFFFFF;
+	std::string model, cls;
+	std::string name = Engine()->GetHeldObjectInfo(idx, model, cls);
+	if (idx != g_LastHeldIdx) {                 // handle changed => a different object now held
+		g_LastHeldIdx = idx;
+		if (idx != 0xFFFFFFFF) {                // grabbed something (0xFFFFFFFF = empty hand)
+			std::string friendly = mod::inventory::LookupPickupName(name);
+			if (friendly.empty()) friendly = mod::inventory::LookupPickupName(model);
+			char b[288];
+			if (!friendly.empty()) {
+				sprintf_s(b, sizeof(b), "pickup(held): %s  (%s%s%s%s%s) [ent %u]", friendly.c_str(),
+					name.empty() ? "?" : name.c_str(),
+					(!name.empty() && !model.empty()) ? " / " : "",
+					model.empty() ? "" : model.c_str(),
+					cls.empty() ? "" : " : ",
+					cls.empty() ? "" : cls.c_str(), idx & 0xFFFF);
+			} else {
+				sprintf_s(b, sizeof(b), "pickup(held): %s%s%s%s%s [ent %u : ser %u]",
+					name.empty() ? "<unnamed>" : name.c_str(),
+					cls.empty() ? "" : "  class=", cls.c_str(),
+					model.empty() ? "" : "  model=", model.c_str(), idx & 0xFFFF, idx >> 16);
+			}
+			LogV(b);
+			const std::string& watch = overlay::invPickupWatch;
+			if (!watch.empty() && (ContainsCI(name, watch) || ContainsCI(model, watch) || ContainsCI(friendly, watch))) {
+				g_PickupCount++;
+			}
+			// End-report tally: count every grab; remember the most-grabbed key
+			// (prefer friendly label, then targetname, then model basename).
+			g_TotalPickups++;
+			std::string key = !friendly.empty() ? friendly
+				: (!name.empty() ? name : (!model.empty() ? model : std::string("<unnamed>")));
+			g_PickupTally[key]++;
+		}
+	}
+
+	// Document being read (currentDocument @ 0x1840), resolved to a name.
+	{
+		unsigned int docIdx = 0xFFFFFFFF;
+		std::string docName = Engine()->GetDocumentInfo(docIdx);
+		if (docIdx != g_LastDocIdx) {
+			g_LastDocIdx = docIdx;
+			if (docIdx != 0xFFFFFFFF) {
+				char b[160];
+				sprintf_s(b, sizeof(b), "document: reading %s [ent %u]",
+					docName.empty() ? "<unnamed>" : docName.c_str(), docIdx & 0xFFFF);
+				LogV(b);
+			} else {
+				LogV("document: closed");
+			}
+		}
+		// Accumulate reading/analyzing time (wall clock with a document open),
+		// clamped like the run timer so alt-tab / load gaps don't inflate it.
+		const unsigned long long nowMs = GetTickCount64();
+		if (g_ReadingLastTick == 0) g_ReadingLastTick = nowMs;
+		unsigned long long rdt = nowMs - g_ReadingLastTick;
+		g_ReadingLastTick = nowMs;
+		if (rdt > 1000) rdt = 0;
+		if (docIdx != 0xFFFFFFFF) g_ReadingElapsedMs += rdt;
+	}
+
+	// 2) Consumable pickups (batteries / coins): SILTA already tracks these counts,
+	//    so log when one goes UP. No per-entity id (the pickup entity is consumed),
+	//    but it tells you WHAT was picked up and the new total. Values above a sane
+	//    ceiling are garbage read before the player spawns (the counter address
+	//    isn't valid yet) - treated as "not ready" so they don't log bogus jumps.
+	const int kMaxPlausibleCount = 100000;
+	auto watchCount = [kMaxPlausibleCount](int* ptr, int& last, const char* label) {
+		if (ptr == nullptr) { last = -1; return; }
+		const int v = *ptr;
+		if (v < 0 || v > kMaxPlausibleCount) { last = -1; return; } // pre-spawn garbage
+		if (last >= 0 && v > last) {
+			char b[96];
+			sprintf_s(b, sizeof(b), "pickup(count): %s +%d (now %d)", label, v - last, v);
+			LogV(b);
+		}
+		last = v;
+	};
+	watchCount(mod::inventory::flashlightBatteriesCounter, g_LastFlashBatt, "flashlight battery");
+	watchCount(mod::inventory::cameraBatteriesCounter, g_LastCamBatt, "camera battery");
+	if (mod::inventory::osCoinsCounter != nullptr) {
+		const int cv = static_cast<int>(*mod::inventory::osCoinsCounter);
+		if (cv < 0 || cv > kMaxPlausibleCount) {
+			g_LastCoins = -1; // garbage before spawn
+		} else {
+			if (g_LastCoins >= 0 && cv > g_LastCoins) {
+				char b[96];
+				sprintf_s(b, sizeof(b), "pickup(count): OS coin +%d (now %d)", cv - g_LastCoins, cv);
+				LogV(b);
+			}
+			g_LastCoins = cv;
+		}
+	} else {
+		g_LastCoins = -1;
+	}
+}
+
+int  mod::inventory::PickupCount() { return g_PickupCount; }
+void mod::inventory::ResetPickups() {
+	g_PickupCount = 0; g_LastHeldIdx = 0xFFFFFFFF;
+	g_TotalPickups = 0; g_PickupTally.clear();
+	g_ReadingElapsedMs = 0; g_ReadingLastTick = 0; g_LastDocIdx = 0xFFFFFFFF;
+}
+
+unsigned long long mod::inventory::ReadingElapsedMs() { return g_ReadingElapsedMs; }
+int mod::inventory::TotalPickups() { return g_TotalPickups; }
+
+// Most-grabbed key + its count (0 / "" until something is picked up).
+std::string mod::inventory::FavoritePickup(int& outCount) {
+	outCount = 0;
+	const std::string* best = nullptr;
+	for (std::map<std::string, int>::const_iterator it = g_PickupTally.begin(); it != g_PickupTally.end(); ++it) {
+		if (it->second > outCount) { outCount = it->second; best = &it->first; }
+	}
+	return best ? *best : std::string();
+}
+
+// On-demand full identity of the currently-held object (class + targetname +
+// model + handle) -> silta.log (always, not verbose-gated) + a toast.
+void mod::inventory::DumpHeldObject() {
+	unsigned int idx = 0xFFFFFFFF;
+	std::string model, cls;
+	std::string name = Engine()->GetHeldObjectInfo(idx, model, cls);
+	if (idx == 0xFFFFFFFF) {
+		LogRaw("dump-held: nothing held (grab an object with E first)");
+		overlay::ShowToast("Dump held: nothing in hand", 2.5f);
+		return;
+	}
+	std::string friendly = mod::inventory::LookupPickupName(name);
+	if (friendly.empty()) friendly = mod::inventory::LookupPickupName(model);
+	char b[320];
+	sprintf_s(b, sizeof(b), "dump-held: class=%s  name=%s  model=%s  friendly=%s  [ent %u : ser %u]",
+		cls.empty() ? "?" : cls.c_str(),
+		name.empty() ? "?" : name.c_str(),
+		model.empty() ? "?" : model.c_str(),
+		friendly.empty() ? "-" : friendly.c_str(), idx & 0xFFFF, idx >> 16);
+	LogRaw(b);
+	char t[160];
+	sprintf_s(t, sizeof(t), "Dumped held: %s -> silta.log",
+		!name.empty() ? name.c_str() : (!model.empty() ? model.c_str() : (cls.empty() ? "?" : cls.c_str())));
+	overlay::ShowToast(t, 3.0f);
+}
+
+// ----- Pickup naming table ([pickup_names] in silta.ini) -----
+void mod::inventory::ClearPickupNames() { g_PickupNames.clear(); }
+
+void mod::inventory::AddPickupName(const char* key, const char* friendly) {
+	if (key == nullptr || friendly == nullptr || key[0] == '\0' || friendly[0] == '\0') return;
+	g_PickupNames[ToLowerStr(key)] = friendly;
+}
+
+// Look up a friendly name by targetname or model basename (case-insensitive).
+std::string mod::inventory::LookupPickupName(const std::string& id) {
+	if (id.empty() || g_PickupNames.empty()) return std::string();
+	auto it = g_PickupNames.find(ToLowerStr(id));
+	return (it != g_PickupNames.end()) ? it->second : std::string();
 }

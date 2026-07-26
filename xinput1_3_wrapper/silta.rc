@@ -1,0 +1,5 @@
+#include "resource.h"
+
+// Health-bar silhouette (Mark Siltanen), embedded so the DLL is self-contained.
+// A loose "health.svg" next to the game exe overrides this at runtime.
+IDR_HEALTH_SVG  RCDATA  "art\\health.svg"

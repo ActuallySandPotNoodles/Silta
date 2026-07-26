@@ -470,11 +470,34 @@ static void StretchAndSaveCameraImage(LPDIRECT3DDEVICE9 dev, IDirect3DSurface9* 
 	// snap). Reject anything degenerate; the shot is skipped, not corrupted.
 	// (pDestSurface isn't created yet and pSrcSurface is the caller's, so a plain
 	// return leaks nothing.)
-	if (srcDesc.Width < 16 || srcDesc.Height < 16) {
-		g_LogWriter << "StretchAndSaveCameraImage(): source is " << srcDesc.Width << "x" << srcDesc.Height
-			<< " - freeze-frame not ready (placeholder); photo skipped" << std::endl;
-		g_LogWriter.flush();
-		overlay::ShowToast("Photo not saved: camera not ready after load. Load the save again to fix this.", 4.0f);
+	// The freeze-frame is the rendered scene at (near) back-buffer resolution. Two
+	// bad states resolve to the WRONG texture and must be skipped:
+	//   - a 1x1 "not loaded" placeholder right after a load, and
+	//   - a small (e.g. 256x256) UI/prop atlas that the freeze-frame slot points
+	//     at when its own texture isn't ready - the "white/corrupted" photo the
+	//     unstable id produces.
+	// Detect both by comparing to the back buffer: anything well below its size is
+	// not a real freeze-frame.
+	UINT bbW = 0, bbH = 0;
+	{
+		IDirect3DSurface9* bb = nullptr;
+		if (dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb) == D3D_OK && bb != nullptr) {
+			D3DSURFACE_DESC bd;
+			if (bb->GetDesc(&bd) == D3D_OK) { bbW = bd.Width; bbH = bd.Height; }
+			bb->Release();
+		}
+	}
+	const bool tooSmallAbs = (srcDesc.Width < 16 || srcDesc.Height < 16);
+	const bool tooSmallRel = (bbW > 0 && bbH > 0 &&
+		(srcDesc.Width * 2 < bbW || srcDesc.Height * 2 < bbH));
+	if (tooSmallAbs || tooSmallRel) {
+		{
+			char m[160];
+			sprintf_s(m, sizeof(m), "StretchAndSaveCameraImage(): source is %ux%u (backbuffer %ux%u) - not the freeze-frame (placeholder/wrong texture); photo skipped",
+				srcDesc.Width, srcDesc.Height, bbW, bbH);
+			LogRaw(m);
+		}
+		overlay::ShowToast("Photo not saved: no usable camera frame here (a reload may help, or try a different spot).", 4.0f);
 		return;
 	}
 
@@ -524,8 +547,12 @@ static void StretchAndSaveCameraImage(LPDIRECT3DDEVICE9 dev, IDirect3DSurface9* 
 	d3dxFilter = mod::functional_camera::linearFilter ? D3DX_FILTER_LINEAR : D3DX_FILTER_POINT;
 	path = GetNextImagePath(); // compute once so the fallback reuses the same name
 
-	g_LogWriter << "StretchAndSaveCameraImage(): saving " << outWidth << "x" << outHeight
-		<< " (source " << srcDesc.Width << "x" << srcDesc.Height << ")" << std::endl;
+	{
+		char m[160];
+		sprintf_s(m, sizeof(m), "StretchAndSaveCameraImage(): saving %dx%d (source %ux%u)",
+			outWidth, outHeight, srcDesc.Width, srcDesc.Height);
+		LogRaw(m);
+	}
 
 	// Scale via a SCRATCH surface. Unlike StretchRect, D3DXLoadSurfaceFromSurface
 	// does a software copy/scale, so it works regardless of the source's pool or
@@ -719,22 +746,20 @@ static void LogEngineCounterProbe() {
 	LogV(m);
 }
 
-static void ExtractAndSaveCameraImageInner(LPDIRECT3DDEVICE9 pDevice, const CInfraCameraFreezeFrame* freezeFrame) {
+static bool ExtractAndSaveCameraImageInner(LPDIRECT3DDEVICE9 pDevice, const CInfraCameraFreezeFrame* freezeFrame) {
 	if (freezeFrame == nullptr || freezeFrame->m_pImage == nullptr) {
-		return;
+		return true;
 	}
 
 	const char* map_name = Engine()->get_map_name();
 	const int texId = freezeFrame->m_pImage->m_nTextureId;
 	{
-		// Diagnostic: log the freeze-frame texture id each shot. If this climbs
-		// across save-loads and the failures track high ids, the id is running
-		// past the texture dictionary (out of range) rather than pointing at a
-		// live-but-recycled entry - which would mean a bounds check could replace
-		// the SEH skip for that case.
+		// Always log the id (not verbose-gated): it's the single most useful line
+		// for diagnosing freeze-frame pointer behaviour, and relying on the verbose
+		// flag has caused us to lose it. One cheap line per shot.
 		char b[64];
 		sprintf_s(b, sizeof(b), "camera: freeze-frame texture id = %d", texId);
-		LogV(b);
+		LogRaw(b);
 	}
 	LogEngineCounterProbe();
 	// Cheap pre-guard: reject an obviously out-of-range id before it turns into a
@@ -744,50 +769,67 @@ static void ExtractAndSaveCameraImageInner(LPDIRECT3DDEVICE9 pDevice, const CInf
 	if (texId < 0 || texId > 1000000) {
 		g_LogWriter << "camera: freeze-frame texture id out of range (" << texId << ") - photo skipped" << std::endl;
 		g_LogWriter.flush();
-		return;
+		return true;
 	}
 
 	const CMatSystemTexture* tex = Engine()->MaterialSystem_GetTextureById(texId);
 
 	if (tex == nullptr) {
 		g_LogWriter << "tex was null in " << map_name << std::endl;
-		return;
+		return true;
 	}
+
+	// Resolve the source CTexture. Primary: the material's representative texture -
+	// the path that has always worked. Do NOT gate this on m_Flags: a freeze-frame
+	// can have m_Flags bit0 clear and still expose a perfectly valid material path
+	// (an earlier build gated on it and wrongly rejected good frames). A dangling
+	// material just faults here and the SEH guard turns it into a clean skip.
+	const CTexture* srcCTex = nullptr;
 
 	const CMaterial* mat = tex->m_pMaterial;
-
-	if (mat == nullptr) {
-		g_LogWriter << "mat was null in " << map_name << std::endl;
-		return;
+	if (mat != nullptr) {
+		const CTexture* repTex = mat->m_representativeTexture;
+		if (repTex != nullptr && repTex->m_pTextureHandles != nullptr && repTex->m_pTextureHandles[0] != nullptr) {
+			srcCTex = repTex;
+		}
 	}
 
-	const CTexture* repTex = mat->m_representativeTexture;
-
-	if (repTex == nullptr) {
-		g_LogWriter << "repTex was null in " << map_name << std::endl;
-		return;
+	// Fallback: the entry's own m_pTexture (0x18), only if the material path was
+	// empty. Harmless when the primary already resolved.
+	if (srcCTex == nullptr) {
+		const CTexture* direct = tex->m_pTexture;
+		if (direct != nullptr && direct->m_pTextureHandles != nullptr && direct->m_pTextureHandles[0] != nullptr) {
+			g_LogWriter << "camera: using entry m_pTexture fallback in " << map_name << std::endl;
+			srcCTex = direct;
+		}
 	}
 
-	Texture_t** texHandles = repTex->m_pTextureHandles;
+	if (srcCTex == nullptr) {
+		LogRaw(std::string("camera: no usable texture in ") + map_name + " (material and m_pTexture both null) - skipped");
+		return true;
+	}
+
+	Texture_t** texHandles = srcCTex->m_pTextureHandles;
 
 	if (texHandles == nullptr) {
 		g_LogWriter << "texHandles was null in " << map_name << std::endl;
-		return;
+		return true;
 	}
 
 	if (texHandles[0] == nullptr) {
 		g_LogWriter << "texHandles[0] was null in " << map_name << std::endl;
-		return;
+		return true;
 	}
 
 	IDirect3DTexture9* srcTex = texHandles[0]->m_pTexture0;
 	IDirect3DSurface9* srcSurf = nullptr;
 	if (srcTex == nullptr || srcTex->GetSurfaceLevel(0, &srcSurf) != D3D_OK || srcSurf == nullptr) {
 		g_LogWriter << "camera: failed to get freeze-frame surface" << std::endl;
-		return;
+		return true;
 	}
 	StretchAndSaveCameraImage(pDevice, srcSurf, srcTex);
 	srcSurf->Release();
+	return false; // reached the saver (it handles its own not-ready/1x1 toast)
 }
 
 // *** EXPERIMENTAL *** Capture the photo from the back buffer instead of walking
@@ -840,8 +882,9 @@ static void CaptureBackBufferAndSave(LPDIRECT3DDEVICE9 dev) {
 // frame (only 'crashed'), which is what makes __try/__except legal here.
 static bool ExtractAndSaveCameraImage(LPDIRECT3DDEVICE9 pDevice, const CInfraCameraFreezeFrame* freezeFrame) {
 	bool crashed = false;
+	bool skipped = false;
 	__try {
-		ExtractAndSaveCameraImageInner(pDevice, freezeFrame);
+		skipped = ExtractAndSaveCameraImageInner(pDevice, freezeFrame);
 	} __except (EXCEPTION_EXECUTE_HANDLER) {
 		crashed = true;
 	}
@@ -854,7 +897,9 @@ static bool ExtractAndSaveCameraImage(LPDIRECT3DDEVICE9 pDevice, const CInfraCam
 			<< std::endl;
 		g_LogWriter.flush();
 	}
-	return crashed;
+	// Toast whenever the shot was skipped for ANY reason (AV, or a null in the
+	// walk like texHandles-null in fullscreen), not just the AV case.
+	return crashed || skipped;
 }
 
 // Per-frame calibration hunt (throttled to 2 Hz). While [camera] calibrate holds
@@ -910,7 +955,7 @@ void mod::functional_camera::EndScene(LPDIRECT3DDEVICE9 pDevice) {
 			// Toast here (not in the SEH wrapper - that frame can't hold a
 			// std::string temporary) so the player knows the shot was skipped.
 			if (ExtractAndSaveCameraImage(pDevice, g_FreezeFrame)) {
-				overlay::ShowToast("Photo not saved: camera not ready after load. Load the save again to fix this.", 4.0f);
+				overlay::ShowToast("Photo not saved: no usable camera frame here (a reload may help, or try a different spot).", 4.0f);
 			}
 		}
 	}

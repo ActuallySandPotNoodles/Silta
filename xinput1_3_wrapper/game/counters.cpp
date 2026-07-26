@@ -403,5 +403,69 @@ namespace mod {
 
 			overlay::lines[line_idx].blinksLeft = 7;
 		}
+
+		// ----- Run-origin marker (report validity, persisted in the save) -----
+		// A dedicated global-state entry, set ON only when the office loads.
+		// Global-state is serialized into the save and cleared on New Game, so the
+		// marker rides with the playthrough: load a mid-game save descended from
+		// the office and it's still ON; chapter-select into the middle and it's
+		// absent (AddEntity creates it OFF = "not validated").
+		static const char* const kRunOriginGlobal = "silta_run_origin";
+
+		void MarkRunOrigin() {
+			if (Engine() == nullptr) return;
+			const std::string origin = overlay::startMapToken.empty()
+				? std::string("infra_c1_m1_office") : overlay::startMapToken;
+			const int idx = Engine()->GlobalEntity_AddEntity(kRunOriginGlobal, origin.c_str(), GLOBALESTATE::GLOBAL_OFF);
+			Engine()->GlobalEntity_SetCounter(idx, 1);
+			Engine()->GlobalEntity_SetState(idx, GLOBALESTATE::GLOBAL_ON);
+		}
+
+		bool IsRunOriginMarked() {
+			if (Engine() == nullptr) return false;
+			const std::string origin = overlay::startMapToken.empty()
+				? std::string("infra_c1_m1_office") : overlay::startMapToken;
+			const int idx = Engine()->GlobalEntity_AddEntity(kRunOriginGlobal, origin.c_str(), GLOBALESTATE::GLOBAL_OFF);
+			return Engine()->GlobalEntity_GetState(idx) == GLOBALESTATE::GLOBAL_ON;
+		}
+
+		// ----- Whole-campaign totals -----
+		void ComputeCampaignTotals(int* curOut, int* maxOut) {
+			for (int i = 0; i < overlay::CategoryCount; ++i) { curOut[i] = 0; maxOut[i] = 0; }
+			if (Engine() == nullptr) return;
+			LoadMapData();
+
+			// Working copy with the same inactive-photo-spot exclusions the per-map
+			// display uses (applied before iterating, so no mutation mid-loop).
+			nlohmann::json work = g_active_mapdata;
+			work = exclude_inactive_photo_spots("infra_c2_m2_reserve2", work);
+			work = exclude_inactive_photo_spots("infra_c3_m2_tunnel2", work);
+			work = exclude_inactive_photo_spots("infra_c5_m1_watertreatment", work);
+
+			struct Cat { int event; const char* field; };
+			static const Cat kCat[overlay::CategoryCount] = {
+				{ 0, "camera_targets" },
+				{ 1, "corruption_targets" },
+				{ 2, "repair_targets" },
+				{ 4, "geocaches" },
+				{ 5, "water_flow_meter_targets" },
+			};
+
+			for (nlohmann::json::iterator it = work.begin(); it != work.end(); ++it) {
+				const std::string mapkey = it.key();
+				nlohmann::json& mv = it.value();
+				for (int idx = 0; idx < overlay::CategoryCount; ++idx) {
+					nlohmann::json::iterator fit = mv.find(kCat[idx].field);
+					if (fit != mv.end() && fit->is_number_integer()) {
+						maxOut[idx] += fit->get<int>();
+					}
+					const std::string cname = get_counter_name(mapkey.c_str(), GetMapStatName(kCat[idx].event));
+					const int gi = Engine()->GlobalEntity_AddEntity(cname.c_str(), mapkey.c_str(), GLOBALESTATE::GLOBAL_OFF);
+					if (Engine()->GlobalEntity_GetState(gi) == GLOBALESTATE::GLOBAL_ON) {
+						curOut[idx] += Engine()->GlobalEntity_GetCounter(gi);
+					}
+				}
+			}
+		}
 	}
 }

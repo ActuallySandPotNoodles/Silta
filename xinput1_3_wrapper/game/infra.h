@@ -225,7 +225,11 @@ namespace infra {
 			                             // 0..100 percent (found via SILTA autoscan)
 			int32_t m_nFlashlightBatteries; //0x1850
 			int32_t m_nCameraBatteries; //0x1854
-		}; //Size: 0x1858
+			char pad_1858[0x44]; //0x1858
+			CBaseHandle heldObject; //0x189C - entity you're holding with E (DT_INFRA_Player "heldObject")
+			char pad_18A0[0x4]; //0x18A0 - rampSlowFactor
+			int32_t m_hasUpgradedFlashlight; //0x18A4 - DT_INFRA_Player "hasUpgradedFlashlight"
+		}; //Size: 0x18A8
 
 		class CUtlMemory
 		{
@@ -391,6 +395,28 @@ namespace infra {
 		CBaseEntity* CGlobalEntityList__FindEntityByName(CBaseEntity* pStartEntity, const char* szName,
 		                                                 CBaseEntity* pSearchingEntity = nullptr, CBaseEntity* pActivator = nullptr,
 		                                                 CBaseEntity* pCaller = nullptr, void* pFilter = nullptr) const;
+
+		// Name/class of the entity the player is holding with E (DT_INFRA_Player
+		// heldObject @ 0x189C). Empty string when nothing is held. SEH-guarded.
+		std::string GetHeldObjectName() const;
+		// Same, but also reports the raw entity handle (for detecting new pickups),
+		// the model basename (e.g. "brick.mdl"), and the entity classname (e.g.
+		// "prop_physics") to identify generic props more fully.
+		std::string GetHeldObjectInfo(unsigned int& outIndex, std::string& outModel, std::string& outClass) const;
+		// DT_INFRA_Player hasUpgradedFlashlight @ 0x18A4.
+		bool HasUpgradedFlashlight() const;
+		// True while the phone/call is up (currentPhoneCall @ 0x1844).
+		bool IsPhoneOut() const;
+		// Name/class of the document being read (currentDocument @ 0x1840), else empty.
+		std::string GetDocumentInfo(unsigned int& outIndex) const;
+		// Classname of the entity whose EHANDLE sits at player+offset (e.g. the
+		// active weapon -> "infra_phone"), or "" if empty/invalid.
+		std::string ClassAtOffset(unsigned int offset) const;
+		// Sweep the player struct and log EHANDLE offsets whose class contains the
+		// given substring (offset-finder for the active-weapon handle).
+		void LogHandleOffsetsMatching(const char* classContains) const;
+		// flashlightEnabled @ 0x1848 (on) + hasUpgradedFlashlight @ 0x18A4 (upgraded).
+		bool GetFlashlightState(bool& upgraded, bool& on) const;
 	private:
 		std::vector<void*> enabledHooks;
 		void* engine_base;

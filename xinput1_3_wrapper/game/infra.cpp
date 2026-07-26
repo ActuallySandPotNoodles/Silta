@@ -39,6 +39,25 @@ void LogV(const std::string& msg) { if (g_LogVerbose) LogLine("dbg", msg); }
 void LogI(const std::string& msg) { LogLine("inf", msg); }
 void LogE(const std::string& msg) { LogLine("ERR", msg); g_LogWriter.flush(); }
 
+// Thread-safe unprefixed line. The camera writes raw lines from the main thread
+// while photo-encode workers log from background threads; both must take g_LogMx
+// or the two interleave mid-line and leave stray NUL/garbage bytes in the file.
+void LogRaw(const std::string& msg) {
+	std::lock_guard<std::mutex> lk(g_LogMx);
+	g_LogWriter << msg << "\n";
+	g_LogWriter.flush();
+}
+
+void ClearSiltaLog() {
+	std::lock_guard<std::mutex> lk(g_LogMx);
+	g_LogWriter.close();
+	g_LogWriter.open("silta.log", std::ios_base::out | std::ios_base::trunc);
+	if (g_LogWriter.is_open()) {
+		g_LogWriter << overlay::kModName << " v" << overlay::kVersion << " - LOG CLEARED" << std::endl;
+		g_LogWriter.flush();
+	}
+}
+
 // Last-chance crash marker: notes the crash address/module in the log before the
 // process dies, so "it crashed on Back" becomes "access violation at overlay.cpp
 // code, address X". Registered once at startup.
@@ -94,6 +113,12 @@ HRESULT __stdcall EndScene(LPDIRECT3DDEVICE9 pDevice);
 HRESULT (__stdcall *EndScene_orig)(LPDIRECT3DDEVICE9 pDevice);
 void MaybeRenderOverlay(LPDIRECT3DDEVICE9 pDevice);
 
+// Low-level keyboard hook (experimental) is defined below EndScene; declared
+// here so load_config (above it) can start/stop it.
+static bool g_UseLowLevelHook = false;
+static void StartLowLevelHook();
+static void StopLowLevelHook();
+
 // DirectX Reset() - hooked so the overlay releases its D3DPOOL_DEFAULT objects
 // before the game resets a lost device (exclusive-fullscreen alt-tab). Without
 // this, Reset fails while ImGui's buffers are alive and the game can never
@@ -118,7 +143,7 @@ static bool g_SuccessCountersEnabled = true;
 static bool g_FunctionalCameraEnabled = true;
 static bool g_InventoryOverlayEnabled = true;
 static bool g_ReportEnabled = true;
-static float g_ReportSeconds = 12.0f;
+static float g_ReportSeconds = 18.0f;
 static std::vector<std::string> g_ReportTokens;   // map-name substrings that trigger the report
 static std::vector<std::string> g_InvHideTokens;  // map-name substrings where the inventory hides
 static std::string g_ReportLastMap;               // guard: generate once per ending-map load
@@ -270,6 +295,197 @@ namespace infra {
 	                                                 CBaseEntity* pSearchingEntity, CBaseEntity* pActivator,
 	                                                 CBaseEntity* pCaller, void* pFilter) const {
 		return this->pFindEntityByName(this->server_entity_list(), pStartEntity, szName, pSearchingEntity, pActivator, pCaller, pFilter);
+	}
+
+	// Raw (char*) resolver - SEH-guarded, so it must hold NO C++ objects needing
+	// unwinding. Returns a pointer into the entity-info table (valid while the
+	// entity lives) or nullptr, and reports the raw handle in *outIndex so callers
+	// can detect a *new* pickup (handle changed). The caller copies the name into
+	// a std::string outside the __try.
+	static const char* ResolveHandleName(const InfraEngine* eng, unsigned int handleOffset,
+	                                     unsigned int* outIndex, const char** outModel,
+	                                     const char** outClass) {
+		if (outIndex != nullptr) *outIndex = 0xFFFFFFFF;
+		if (outModel != nullptr) *outModel = nullptr;
+		if (outClass != nullptr) *outClass = nullptr;
+		__try {
+			void* player = eng->CGlobalEntityList__FindEntityByName(nullptr, "!player");
+			if (player == nullptr) return nullptr;
+
+			const CBaseHandle* held = reinterpret_cast<const CBaseHandle*>(
+				reinterpret_cast<const char*>(player) + handleOffset);
+			if (outIndex != nullptr) *outIndex = held->m_Index;
+			if (held->m_Index == 0xFFFFFFFF) return nullptr; // INVALID_EHANDLE
+
+			CGlobalEntityList* list = eng->server_entity_list();
+			if (list == nullptr) return nullptr;
+
+			const int idx = held->GetEntryIndex();
+			if (idx <= 0 || idx >= NUM_ENT_ENTRIES) return nullptr;
+
+			const CEntInfo* info = &list->m_EntPtrArray[idx];
+			if (info->m_pEntity == nullptr || info->m_SerialNumber != held->GetSerialNumber()) return nullptr;
+
+			// m_ModelName @ entity+0xAC (string_t) - distinguishes generic props.
+			if (outModel != nullptr) {
+				*outModel = *reinterpret_cast<const char* const*>(
+					reinterpret_cast<const char*>(info->m_pEntity) + 0xAC);
+			}
+			// m_iClassName @ CEntInfo - always reported (unlike the return value,
+			// which prefers the targetname). Lets callers show class + name.
+			if (outClass != nullptr) *outClass = info->m_iClassName;
+			if (info->m_iName != nullptr && info->m_iName[0] != '\0') return info->m_iName;
+			if (info->m_iClassName != nullptr) return info->m_iClassName;
+			return nullptr;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return nullptr;
+		}
+	}
+
+	std::string InfraEngine::GetHeldObjectName() const {
+		const char* n = ResolveHandleName(this, 0x189C, nullptr, nullptr, nullptr);
+		return (n != nullptr) ? std::string(n) : std::string();
+	}
+
+	std::string InfraEngine::GetHeldObjectInfo(unsigned int& outIndex, std::string& outModel, std::string& outClass) const {
+		const char* mdl = nullptr;
+		const char* cls = nullptr;
+		const char* n = ResolveHandleName(this, 0x189C, &outIndex, &mdl, &cls);
+		if (mdl != nullptr) {
+			const char* slash = mdl;
+			for (const char* p = mdl; *p != '\0'; ++p) if (*p == '/' || *p == '\\') slash = p + 1;
+			outModel = slash;
+		} else {
+			outModel.clear();
+		}
+		// std::string built OUTSIDE the SEH helper (per the __try/unwinding rule).
+		outClass = (cls != nullptr) ? std::string(cls) : std::string();
+		return (n != nullptr) ? std::string(n) : std::string();
+	}
+
+	// currentDocument @ 0x1840 (DT_INFRA_Player) - the document entity being read.
+	std::string InfraEngine::GetDocumentInfo(unsigned int& outIndex) const {
+		const char* n = ResolveHandleName(this, 0x1840, &outIndex, nullptr, nullptr);
+		return (n != nullptr) ? std::string(n) : std::string();
+	}
+
+	// Resolve the EHANDLE at player+offset to its entity classname (e.g.
+	// "infra_phone"), or "" if empty/invalid. Used to detect the active tool -
+	// e.g. whether the phone weapon is out, which currentPhoneCall @0x1844 (a
+	// live CALL) does not cover.
+	std::string InfraEngine::ClassAtOffset(unsigned int offset) const {
+		const char* cls = nullptr;
+		ResolveHandleName(this, offset, nullptr, nullptr, &cls);
+		return (cls != nullptr) ? std::string(cls) : std::string();
+	}
+
+	// POD match record (no destructor) so it can be filled inside a __try.
+	struct HandleMatch { unsigned int off; char cls[64]; };
+
+	// Leaf SEH helper: sweep the player struct for EHANDLEs whose class contains
+	// `classContains`, filling a POD array. Contains NO C++ object needing
+	// unwinding, so the caller (which builds std::strings via LogRaw) stays
+	// C2712-safe. The __try must live here alone, not in the logging function.
+	static int CollectHandleMatches(const InfraEngine* eng, const char* classContains,
+	                                HandleMatch* out, int maxOut) {
+		int n = 0;
+		__try {
+			void* player = eng->CGlobalEntityList__FindEntityByName(nullptr, "!player");
+			CGlobalEntityList* list = eng->server_entity_list();
+			if (player != nullptr && list != nullptr) {
+				const char* base = reinterpret_cast<const char*>(player);
+				for (unsigned int off = 0; off + 4 <= 0x1800 && n < maxOut; off += 4) {
+					const CBaseHandle* h = reinterpret_cast<const CBaseHandle*>(base + off);
+					if (h->m_Index == 0xFFFFFFFF) continue;
+					const int idx = h->GetEntryIndex();
+					if (idx <= 0 || idx >= NUM_ENT_ENTRIES) continue;
+					const CEntInfo* info = &list->m_EntPtrArray[idx];
+					if (info->m_pEntity == nullptr || info->m_SerialNumber != h->GetSerialNumber()) continue;
+					const char* cls = info->m_iClassName;
+					if (cls == nullptr || cls[0] == '\0') continue;
+					if (classContains == nullptr || classContains[0] == '\0' || strstr(cls, classContains) != nullptr) {
+						out[n].off = off;
+						strncpy_s(out[n].cls, sizeof(out[n].cls), cls, _TRUNCATE);
+						n++;
+					}
+				}
+			}
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			n = 0;
+		}
+		return n;
+	}
+
+	// Offset-finder for EHANDLE fields: logs the offset + classname of active
+	// handles matching `classContains`. Lets the user find the active-weapon
+	// handle offset (e.g. infra_phone) with the phone out - no Cheat Engine. No
+	// __try here (LogRaw builds std::string temporaries), only in the leaf above.
+	void InfraEngine::LogHandleOffsetsMatching(const char* classContains) const {
+		HandleMatch matches[24];
+		const int n = CollectHandleMatches(this, classContains, matches, 24);
+		for (int i = 0; i < n; ++i) {
+			char b[128];
+			sprintf_s(b, sizeof(b), "SCAN handle @0x%X -> class=%s", matches[i].off, matches[i].cls);
+			LogRaw(b);
+		}
+	}
+
+	// flashlightEnabled @ 0x1848 (on/off) + hasUpgradedFlashlight @ 0x18A4, in one
+	// SEH-guarded player read - for the cosmetic battery-days countdown.
+	static bool ReadFlashlightState(const InfraEngine* eng, bool& upgraded, bool& on) {
+		__try {
+			void* player = eng->CGlobalEntityList__FindEntityByName(nullptr, "!player");
+			if (player == nullptr) return false;
+			const char* base = reinterpret_cast<const char*>(player);
+			on       = (*reinterpret_cast<const int*>(base + 0x1848) != 0);
+			upgraded = (*reinterpret_cast<const int*>(base + 0x18A4) != 0);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	bool InfraEngine::GetFlashlightState(bool& upgraded, bool& on) const {
+		upgraded = false; on = false;
+		return ReadFlashlightState(this, upgraded, on);
+	}
+
+	// SEH-guarded read of the player's hasUpgradedFlashlight flag (@0x18A4).
+	static bool ReadUpgradedFlashlight(const InfraEngine* eng, bool& out) {
+		__try {
+			CINFRA_Player* player = reinterpret_cast<CINFRA_Player*>(
+				eng->CGlobalEntityList__FindEntityByName(nullptr, "!player"));
+			if (player == nullptr) return false;
+			out = (player->m_hasUpgradedFlashlight != 0);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	bool InfraEngine::HasUpgradedFlashlight() const {
+		bool v = false;
+		return ReadUpgradedFlashlight(this, v) ? v : false;
+	}
+
+	// currentPhoneCall @ 0x1844 (DT_INFRA_Player): non-zero/valid handle while a
+	// call is up. Used to hide the binocular when the phone is out.
+	static bool ReadPhoneOut(const InfraEngine* eng, bool& out) {
+		__try {
+			void* player = eng->CGlobalEntityList__FindEntityByName(nullptr, "!player");
+			if (player == nullptr) return false;
+			const unsigned int v = *reinterpret_cast<const unsigned int*>(
+				reinterpret_cast<const char*>(player) + 0x1844);
+			out = (v != 0 && v != 0xFFFFFFFF);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	bool InfraEngine::IsPhoneOut() const {
+		bool v = false;
+		return ReadPhoneOut(this, v) ? v : false;
 	}
 
 
@@ -471,6 +687,12 @@ void overlay::RunTweakKey(int vk) {
 	}
 }
 
+void overlay::QueueEngineCommand(const std::string& cmd) {
+	if (cmd.empty()) return;
+	std::lock_guard<std::mutex> lk(g_PendingCmdMx);
+	g_PendingTweakCmds.push_back(cmd);
+}
+
 static void DrainTweakKeyCommands() {
 	std::vector<std::string> pending;
 	{
@@ -560,7 +782,7 @@ static void load_config() {
 			"; ===== Overlay style =====\n; 0 = auto-size by resolution, otherwise a pixel font size.");
 		config.SetValue("overlay", "text_color", "FFFFFF",
 			"; Hex RRGGBB. Normal counter text.");
-		config.SetValue("overlay", "complete_color", "00FF00",
+		config.SetValue("overlay", "complete_color", "27CE27",
 			"; Hex RRGGBB. Counter text once a category is fully complete.");
 		config.SetValue("overlay", "title_color", "666666",
 			"; Hex RRGGBB. Map-name title and inventory labels.");
@@ -576,7 +798,7 @@ static void load_config() {
 			"; native = squared/bordered HUD style; debug = plain ImGui look.");
 		config.SetBoolValue("overlay", "hotkey_tips", true,
 			"; Show a hotkey tip bar at the top when the cursor is out (phone/menu).");
-		config.SetBoolValue("overlay", "tip_fade", false,
+		config.SetBoolValue("overlay", "tip_fade", true,
 			"; Fade the hotkey tip bar out after tip_fade_seconds (off = stays while cursor is out).");
 		config.SetDoubleValue("overlay", "tip_fade_seconds", 8.0,
 			"; Seconds the tip bar stays before fading (when tip_fade = true).");
@@ -618,6 +840,15 @@ static void load_config() {
 			"; Hex offset into engine.dll for the probe above, e.g. 0x120D91. Empty = off.");
 		config.SetBoolValue("overlay", "save_layout", true,
 			"; Remember dragged overlay/notes/sketch window positions across game restarts.");
+		config.SetValue("overlay", "border_color", "",
+			"; Counters/inventory window border as R,G,B,A (0-255 each). Empty = theme\n"
+			"; default. Examples: 255,140,0,255 (orange) - ,,,0 (alpha only: no border).");
+		config.SetValue("overlay", "edit_autoclose", "10",
+			"; Auto-close edit mode (unlock via F11) after this many seconds without\n"
+			"; dragging, so you can't get stuck in placement mode. Blank or 0 = never.");
+		config.SetBoolValue("overlay", "auto_align", false,
+			"; Re-snap the counters and inventory to their corners on every map load,\n"
+			"; re-measured at their current size (they auto-adjust as values change).");
 		config.SetValue("overlay", "palette", "default",
 			"; Colour palette preset: default | osmo (amber) | ncg (navy) | corruption (red).");
 		config.SetBoolValue("overlay", "location_names", true,
@@ -726,6 +957,63 @@ static void load_config() {
 		config.SetValue("inventory", "oscoins_color", "FFD96E");
 		config.SetBoolValue("inventory", "battery_icons", true,
 			"; Draw a small battery glyph next to the flashlight and camera lines.");
+		config.SetBoolValue("inventory", "show_held", false,
+			"; Show what you're holding with E (the held object's name), read from the\n"
+			"; player's networked heldObject field. Off by default.");
+		config.SetBoolValue("inventory", "show_flashlight_upgrade", false,
+			"; Show a Flashlight: upgraded line once you have the flashlight upgrade.");
+		config.SetValue("inventory", "pickup_watch", "",
+			"; Novelty tally: counts each object you pick up (hold with E) whose\n"
+			"; name contains this text, case-insensitive. e.g. osmo counts beers.\n"
+			"; Empty = off.");
+		config.SetValue("inventory", "pickup_label", "Picked up",
+			"; Label shown before the pickup tally, e.g. Osmo olut.");
+		config.SetBoolValue("binocular", "enabled", true,
+			"; Binocular zoom mask: two-circle viewport drawn over the game while the\n"
+			"; zoom key is held (default middle mouse, like INFRA/Portal 2).");
+		config.SetValue("binocular", "key", "0x04",
+			"; Activation key (vk hex/dec). 0x04 = middle mouse.");
+		config.SetBoolValue("binocular", "hide_on_phone", true,
+			"; Hide the scope while the phone/call is out (also fixes ESC state-flip).");
+		config.SetBoolValue("binocular", "hide_on_flashlight", false,
+			"; Hide the scope while the flashlight is ON (flashlightEnabled @0x1848).");
+		config.SetValue("binocular", "camera_offset", "",
+			"; OPTIONAL player-struct offset (hex/dec) of a 'camera is out' flag; when\n"
+			"; that int is non-zero the scope hides. Empty = disabled. There is no\n"
+			"; verified offset yet - find one in Cheat Engine and put it here to enable.");
+		config.SetBoolValue("binocular", "toggle", true,
+			"; false = hold to look, true = press to toggle.");
+		config.SetLongValue("binocular", "opacity", 255,
+			"; 0-255 darkness of the mask outside the circles (255 = solid black).");
+		config.SetLongValue("binocular", "softness", 24,
+			"; Edge feather in pixels (higher = softer circle edge).");
+		config.SetDoubleValue("binocular", "radius", 0.46,
+			"; Circle radius as a fraction of screen height.");
+		config.SetDoubleValue("binocular", "separation", 0.13,
+			"; Half-distance between the two eyes as a fraction of screen width.");
+		config.SetValue("binocular", "color", "0,0,0",
+			"; Mask colour R,G,B (0-255). Default black.");
+		config.SetLongValue("binocular", "fade_ms", 120,
+			"; Fade in/out duration in milliseconds.");
+		config.SetBoolValue("binocular", "sound", true,
+			"; Play the phone deploy/holster jacket sound on zoom in/out.");
+		config.SetValue("binocular", "sound_deploy", "Item.Deploy",
+			"; Soundscript played on zoom in (playgamesound <name>).");
+		config.SetValue("binocular", "sound_holster", "Item.Holster",
+			"; Soundscript played on zoom out.");
+		config.SetValue("binocular", "phone_weapon_offset", "0x890",
+			"; EHANDLE offset (hex/dec) of the active weapon. When it resolves to phone_class the scope hides. Find it with [speedrun] scan_offsets while the phone is out - look for 'SCAN handle @0x... -> class=infra_phone'. Empty = off.");
+		config.SetValue("binocular", "phone_class", "infra_phone",
+			"; Classname that counts as 'phone out' for phone_weapon_offset.");
+		config.SetBoolValue("binocular", "fov_gate", false,
+			"; EXPERIMENTAL, off. Would drive the scope off m_iFOV instead of the key\n"
+			"; toggle, but INFRA doesn't route its zoom through this field on the tested\n"
+			"; build, so it's disabled. Leave false; the scope uses the key toggle.");
+		config.SetValue("binocular", "fov_offset", "0xC10",
+			"; Player-struct offset (hex/dec) of m_iFOV (int). 0xC10 on this build.");
+		config.SetLongValue("binocular", "fov_zoom_max", 60,
+			"; FOV at or below which counts as 'zoomed' (scope shown). The default FOV\n"
+			"; is wider than this; the binocular zoom is much narrower.");
 		config.SetBoolValue("inventory", "coin_icon", true,
 			"; Draw a coin glyph next to OS Coins (appears once you have at least 1).");
 		config.SetBoolValue("inventory", "flashlight_gauge", true,
@@ -754,6 +1042,12 @@ static void load_config() {
 			"; Smooth fade-out duration (seconds) at the end of the linger.");
 		config.SetBoolValue("inventory", "flashlight_gauge_numbers", false,
 			"; Show the % text (and the spare-battery count) on the gauge.");
+		config.SetDoubleValue("inventory", "upgraded_days", 60.0,
+			"; Cosmetic 'days remaining' shown under the gauge for the UPGRADED flashlight\n"
+			"; (the late-game one, which is effectively infinite) - pure flavour, counts\n"
+			"; down slowly with flashlight-on time. 0 = off. The NORMAL flashlight instead\n"
+			"; shows its real time-to-empty, estimated live. Both only appear on the\n"
+			"; 'default' or 'custom' gauge skin (the 'subtle' default stays clean).");
 		config.SetValue("inventory", "flashlight_gauge_skin", "subtle",
 			"; Gauge skin: default (instrument panel), subtle (slim transparent bar),\n"
 			"; or custom (panel layout with the colors below).");
@@ -845,7 +1139,71 @@ static void load_config() {
 
 		config.SetBoolValue("contact_sheet", "enabled", true,
 			"; ===== Photo contact sheet =====\n; Thumbnail grid of this session's photos with a click-to-isolate zoom view.");
+		config.SetValue("contact_sheet", "sort", "name",
+			"; Contact sheet order: name | date_new (newest first) | date_old. Pinned\n"
+			"; photos (star in the viewer) always sort first.");
 
+		config.SetBoolValue("speedrun", "show_timer", false,
+			"; Show an on-screen run timer (accumulates during gameplay, pauses in\n"
+			"; menus). For speedrunning.");
+		config.SetBoolValue("speedrun", "show_velocity", false,
+			"; Draw horizontal speed in Hammer units/sec, themed to the overlay (like a\n"
+			"; styled cl_showpos). Needs velocity_offset set to actually read a number.");
+		config.SetBoolValue("speedrun", "position_axis", false,
+			"; Label the position readout as 'X: Y: Z:' instead of three bare numbers.");
+		config.SetBoolValue("speedrun", "show_position", false,
+			"; Draw player position X Y Z (like cl_showpos). Needs position_offset.");
+		config.SetValue("speedrun", "position_offset", "0x2C",
+			"; Player-struct offset (hex/dec) of m_vecOrigin (3 floats). Empty = off. Find it in Cheat Engine like velocity; logged so you can confirm it's sane.");
+		config.SetValue("speedrun", "probe_offset", "",
+			"; OFFSET FINDER: dumps probe_count floats from here to silta.log once/sec. Sweep near health (0x210) while moving to spot velocity (changes) or position (big coords). Empty = off.");
+		config.SetLongValue("speedrun", "probe_count", 8,
+			"; How many consecutive floats the probe dumps (1-24).");
+		config.SetBoolValue("speedrun", "scan_offsets", false,
+			"; AUTO-FINDER (no Cheat Engine needed). Sweeps the whole player struct and reports likely velocity/position offsets to silta.log every 2s. Turn on, then WALK for a few seconds and STAND STILL a few times; look for 'SCAN vel?' / 'SCAN pos?' lines, copy the offsets into velocity_offset / position_offset, then turn this back off.");
+		config.SetBoolValue("speedrun", "death_toast", false,
+			"; Pop a 'Death #n' toast when you die (the death counter still increments either way).");
+		config.SetLongValue("speedrun", "panel_x", 12,
+			"; Speedrun panel starting position, pixels from the top-left. It's still");
+		config.SetLongValue("speedrun", "panel_y", 12,
+			"; draggable when overlays are unlocked (F11); this sets where it first appears.");
+		config.SetDoubleValue("speedrun", "bg_alpha", 0.35,
+			"; Panel background opacity, 0 (invisible) .. 1 (solid).");
+		config.SetDoubleValue("speedrun", "scale", 1.0,
+			"; Panel text/size scale (1.0 = normal, 1.5 = bigger, 0.8 = smaller).");
+		config.SetValue("speedrun", "velocity_offset", "0x168",
+			"; Player-struct offset (hex/dec) of m_vecVelocity (3 floats). 0x168 was found\n"
+			"; via scan_offsets on this INFRA build (0 standing, ground speed moving); the\n"
+			"; value self-logs so you can confirm. Empty/0 = off.");
+		config.SetBoolValue("speedrun", "count_deaths", false,
+			"; Count deaths next to the timer / in the end report. Requires\n"
+			"; health_offset below (found via Cheat Engine). Off by default.");
+		config.SetValue("speedrun", "health_offset", "0x210",
+			"; Hex offset of the player's m_iHealth within the server entity. 0x210 was\n"
+			"; read from server.dll's datadesc for this INFRA build; verify in the log\n"
+			"; (enable count_deaths - it prints 'player health = N' on change). Empty =\n"
+			"; death counter disabled.");
+		config.SetBoolValue("speedrun", "timer_in_report", true,
+			"; Include run time (and deaths, if counted) in the end-of-game report.");
+		config.SetBoolValue("health", "show_bar", false,
+			"; Max Payne-style silhouette health bar (debug). Fills green->red with\n"
+			"; the player's health, read at [speedrun] health_offset. Off by default.");
+		config.SetLongValue("health", "max", 100,
+			"; Health value treated as 100%% full for the bar.");
+		config.SetBoolValue("health", "fill_gradient", true,
+			"; true = vertical gradient inside the fill (liquid look), false = flat.");
+		config.SetLongValue("health", "bar_px", 110,
+			"; Silhouette height in pixels when the SVG art loads. A loose 'health.svg' next to the game exe overrides the embedded art (edit + reload to iterate).");
+		config.SetBoolValue("health", "no_background", false,
+			"; true = no window background panel behind the silhouette.");
+		config.SetBoolValue("health", "show_hp", true,
+			"; Draw the HP number under the silhouette.");
+		config.SetValue("health", "fill_full", "95,225,110",
+			"; Fill colour R,G,B (0-255) at full health. Default = INFRA mushroom green.");
+		config.SetValue("health", "fill_low", "220,60,55",
+			"; Fill colour R,G,B at low health (the fill lerps full->low as HP drops).");
+		config.SetValue("health", "empty_color", "38,40,46",
+			"; Colour R,G,B of the drained (unfilled) part of the silhouette.");
 		config.SetBoolValue("log", "verbose", false,
 			"; ===== Logging =====\n; Verbose silta.log: timestamps every line, flushes immediately (so a crash\n; leaves the last action in the log), and adds debug breadcrumbs. Turn on when\n; hunting a bug or filing a report.");
 
@@ -868,6 +1226,19 @@ static void load_config() {
 			"; *** DEBUG ONLY *** Press this key to force the end-of-game report (file\n"
 			"; + popup) from the current counters, for testing. Empty = disabled.\n"
 			"; Accepts names/hex/decimal like [hotkeys], e.g. X.");
+		config.SetBoolValue("report", "show_reading", true,
+			"; Add 'Reading M:SS' to the report - total wall time spent with a document\n"
+			"; open (currentDocument valid). Hidden if under a second.");
+		config.SetBoolValue("report", "show_pickups", true,
+			"; Add 'Pickups N' + 'Favorite <name> xM' to the report - every held-object\n"
+			"; grab, and the most-grabbed one (friendly label / targetname / model).");
+		config.SetValue("report", "start_map", "infra_c1_m1_office",
+			"; The map that counts as 'the beginning'. A run that starts here plants a\n"
+			"; marker in the save, so the report stays valid across save/load; a\n"
+			"; chapter-select / mid-game start is stamped PARTIAL.");
+		config.SetBoolValue("report", "reset_on_start", true,
+			"; When the start map loads fresh, reset the session timer / deaths / pickups\n"
+			"; so a full run measures only that run.");
 
 		config.SetValue("hotkeys", "reload_config", "F6",
 			"; ===== Hotkeys =====\n"
@@ -885,6 +1256,12 @@ static void load_config() {
 		config.SetValue("hotkeys", "toggle_calculator", "F2", "; Show/hide the field calculator (incl. cipher/programmer tools).");
 		config.SetValue("hotkeys", "toggle_ending", "F1", "; Show/hide the study-outlook (ending predictor) panel.");
 		config.SetValue("hotkeys", "toggle_contact", "F5", "; Show/hide the photo contact sheet.");
+		config.SetValue("hotkeys", "clear_log", "0xBF",
+			"; Truncate silta.log (0xBF = the / key). Handy before reproducing a bug.");
+		config.SetValue("hotkeys", "dump_held", "",
+			"; Log the FULL identity of the object you're holding (class + targetname +\n"
+			"; model + handle) to silta.log, plus a toast. Grab a prop with E, press this,\n"
+			"; then copy a distinctive token into [pickup_names]. Empty = disabled.");
 		config.SetValue("hotkeys", "key_color", "",
 			"; Hotkey tip bar styling (hex RRGGBB). Empty = follow the overlay theme\n"
 			"; colors (complete_color for keys, text_color for descriptions).");
@@ -895,6 +1272,13 @@ static void load_config() {
 			"; delivering key messages to the overlay. Set true to poll the keys each\n"
 			"; frame instead (only while the game window is focused). Set [log] verbose\n"
 			"; = true to see 'hotkey: poll fired' lines confirming it works.");
+		config.SetBoolValue("hotkeys", "low_level_hook", false,
+			"; *** EXPERIMENTAL *** Strongest input fallback: a system-wide low-level\n"
+			"; keyboard hook (WH_KEYBOARD_LL) that catches keys at the OS level, before\n"
+			"; the game, independent of window messages / raw input / fullscreen. Use\n"
+			"; if BOTH the normal hotkeys and use_polling do nothing. Verbose logs\n"
+			"; 'lowlevel: key vk=..' for every key so you can confirm it receives input.\n"
+			"; Single-player only; a global keyboard hook may trip anti-cheat elsewhere.");
 
 		config.SetBoolValue("tweaks", "enabled", false,
 			"; ===== Engine tweaks (ADVANCED, off by default) =====\n; Runs console commands on each map load via IVEngineClient.\n; engine_interface: leave blank to auto-try common versions, or set one.\n; clientcmd_index: IVEngineClient::ClientCmd vtable slot - VERIFY before enabling,\n; a wrong index can crash. Any other key here is treated as a command to run,\n; e.g.  captions = closecaption 1");
@@ -949,10 +1333,12 @@ static void load_config() {
 	// ----- Overlay style -----
 	overlay::fontSize = config.GetLongValue("overlay", "font_size", 0);
 	overlay::fontColor = ParseHexColor(config.GetValue("overlay", "text_color", "FFFFFF"), ImVec4(1.0f, 1.0f, 1.0f, 1.0f));
-	overlay::fontColorMax = ParseHexColor(config.GetValue("overlay", "complete_color", "00FF00"), ImVec4(0.0f, 1.0f, 0.0f, 1.0f));
+	overlay::fontColorMax = ParseHexColor(config.GetValue("overlay", "complete_color", "27CE27"), ImVec4(39.0f/255.0f, 206.0f/255.0f, 39.0f/255.0f, 1.0f));
 	overlay::tipKeyColor = ParseHexColor(config.GetValue("hotkeys", "key_color", ""), overlay::fontColorMax);
 	overlay::tipTextColor = ParseHexColor(config.GetValue("hotkeys", "text_color", ""), overlay::fontColor);
 	overlay::useHotkeyPolling = config.GetBoolValue("hotkeys", "use_polling", false);
+	g_UseLowLevelHook = config.GetBoolValue("hotkeys", "low_level_hook", false);
+	if (g_UseLowLevelHook) StartLowLevelHook(); else StopLowLevelHook();
 	overlay::titleColor = ParseHexColor(config.GetValue("overlay", "title_color", "666666"), ImVec4(0.40f, 0.40f, 0.40f, 1.0f));
 	overlay::backgroundAlpha = static_cast<float>(config.GetDoubleValue("overlay", "background_alpha", 0.30));
 	overlay::margin = config.GetLongValue("overlay", "margin", 10);
@@ -1015,6 +1401,7 @@ static void load_config() {
 
 	// ----- Hotkeys -----
 	overlay::hotkeys.reloadConfig = ParseKeyValue(config.GetValue("hotkeys", "reload_config", ""), overlay::hotkeys.reloadConfig);
+	overlay::hotkeys.clearLog = ParseKeyValue(config.GetValue("hotkeys", "clear_log", "0xBF"), 0xBF);
 	overlay::hotkeys.toggleCounters = ParseKeyValue(config.GetValue("hotkeys", "toggle_counters", ""), overlay::hotkeys.toggleCounters);
 	overlay::hotkeys.toggleInventory = ParseKeyValue(config.GetValue("hotkeys", "toggle_inventory", ""), overlay::hotkeys.toggleInventory);
 	overlay::hotkeys.cycleCountersCorner = ParseKeyValue(config.GetValue("hotkeys", "cycle_counters_corner", ""), overlay::hotkeys.cycleCountersCorner);
@@ -1026,6 +1413,7 @@ static void load_config() {
 	overlay::hotkeys.toggleCalculator = ParseKeyValue(config.GetValue("hotkeys", "toggle_calculator", ""), overlay::hotkeys.toggleCalculator);
 	overlay::hotkeys.toggleEnding = ParseKeyValue(config.GetValue("hotkeys", "toggle_ending", ""), overlay::hotkeys.toggleEnding);
 	overlay::hotkeys.toggleContact = ParseKeyValue(config.GetValue("hotkeys", "toggle_contact", ""), overlay::hotkeys.toggleContact);
+	overlay::hotkeys.dumpHeld = ParseKeyValue(config.GetValue("hotkeys", "dump_held", ""), overlay::hotkeys.dumpHeld);
 
 	// Verbose diagnostic: dump the resolved hotkey codes so a "binds don't work"
 	// report can be checked against what actually parsed. Toggle-menu (Insert by
@@ -1035,12 +1423,13 @@ static void load_config() {
 		sprintf_s(hb, sizeof(hb),
 			"hotkeys resolved: toggle_menu(show/hide all)=0x%02X reload=0x%02X counters=0x%02X "
 			"inventory=0x%02X notes=0x%02X sketch=0x%02X calc=0x%02X ending=0x%02X contact=0x%02X "
-			"lock=0x%02X reset=0x%02X cornerC=0x%02X cornerI=0x%02X",
+			"lock=0x%02X reset=0x%02X cornerC=0x%02X cornerI=0x%02X clearLog=0x%02X dumpHeld=0x%02X",
 			Base::Data::Keys::ToggleMenu, overlay::hotkeys.reloadConfig, overlay::hotkeys.toggleCounters,
 			overlay::hotkeys.toggleInventory, overlay::hotkeys.toggleNotes, overlay::hotkeys.toggleSketch,
 			overlay::hotkeys.toggleCalculator, overlay::hotkeys.toggleEnding, overlay::hotkeys.toggleContact,
 			overlay::hotkeys.toggleLock, overlay::hotkeys.resetPosition,
-			overlay::hotkeys.cycleCountersCorner, overlay::hotkeys.cycleInventoryCorner);
+			overlay::hotkeys.cycleCountersCorner, overlay::hotkeys.cycleInventoryCorner,
+			overlay::hotkeys.clearLog, overlay::hotkeys.dumpHeld);
 		LogV(hb);
 	}
 
@@ -1105,6 +1494,43 @@ static void load_config() {
 	overlay::inventoryColor[1] = ParseHexColor(config.GetValue("inventory", "camera_color", ""), overlay::inventoryColor[1]);
 	overlay::inventoryColor[2] = ParseHexColor(config.GetValue("inventory", "oscoins_color", ""), overlay::inventoryColor[2]);
 	overlay::invBatteryIcons = config.GetBoolValue("inventory", "battery_icons", true);
+	overlay::invShowHeld = config.GetBoolValue("inventory", "show_held", false);
+	overlay::invShowFlashlightUpgrade = config.GetBoolValue("inventory", "show_flashlight_upgrade", false);
+	overlay::invPickupWatch = config.GetValue("inventory", "pickup_watch", "");
+	overlay::invPickupLabel = config.GetValue("inventory", "pickup_label", "Picked up");
+	mod::inventory::ClearPickupNames();
+	{
+		CSimpleIniA::TNamesDepend pnKeys;
+		if (config.GetAllKeys("pickup_names", pnKeys)) {
+			for (CSimpleIniA::TNamesDepend::const_iterator it = pnKeys.begin(); it != pnKeys.end(); ++it) {
+				mod::inventory::AddPickupName(it->pItem, config.GetValue("pickup_names", it->pItem, ""));
+			}
+		}
+	}
+	overlay::binoEnabled = config.GetBoolValue("binocular", "enabled", true);
+	overlay::binoKey = static_cast<int>(strtol(config.GetValue("binocular", "key", "0x04"), nullptr, 0));
+	overlay::binoToggle = config.GetBoolValue("binocular", "toggle", true);
+	overlay::binoHidePhone = config.GetBoolValue("binocular", "hide_on_phone", true);
+	overlay::binoHideFlash = config.GetBoolValue("binocular", "hide_on_flashlight", false);
+	overlay::binoCamOffset = static_cast<unsigned int>(strtoul(config.GetValue("binocular", "camera_offset", ""), nullptr, 0));
+	overlay::binoOpacity = static_cast<int>(config.GetLongValue("binocular", "opacity", 255));
+	overlay::binoSoftness = static_cast<int>(config.GetLongValue("binocular", "softness", 24));
+	overlay::binoRadius = static_cast<float>(config.GetDoubleValue("binocular", "radius", 0.46));
+	overlay::binoSeparation = static_cast<float>(config.GetDoubleValue("binocular", "separation", 0.13));
+	{
+		int br = 0, bg = 0, bb = 0;
+		sscanf_s(config.GetValue("binocular", "color", "0,0,0"), " %d , %d , %d", &br, &bg, &bb);
+		overlay::binoColor[0] = br / 255.0f; overlay::binoColor[1] = bg / 255.0f; overlay::binoColor[2] = bb / 255.0f;
+	}
+	overlay::binoFadeMs = static_cast<int>(config.GetLongValue("binocular", "fade_ms", 120));
+	overlay::binoSound = config.GetBoolValue("binocular", "sound", true);
+	overlay::binoSoundDeploy = config.GetValue("binocular", "sound_deploy", "Item.Deploy");
+	overlay::binoSoundHolster = config.GetValue("binocular", "sound_holster", "Item.Holster");
+	overlay::binoPhoneWeaponOffset = static_cast<unsigned int>(strtoul(config.GetValue("binocular", "phone_weapon_offset", "0x890"), nullptr, 0));
+	overlay::binoPhoneClass = config.GetValue("binocular", "phone_class", "infra_phone");
+	overlay::binoFovGate = config.GetBoolValue("binocular", "fov_gate", false);
+	overlay::binoFovOffset = static_cast<unsigned int>(strtoul(config.GetValue("binocular", "fov_offset", "0xC10"), nullptr, 0));
+	overlay::binoFovZoomMax = static_cast<int>(config.GetLongValue("binocular", "fov_zoom_max", 60));
 	overlay::invCoinIcon = config.GetBoolValue("inventory", "coin_icon", true);
 	overlay::flashGauge = config.GetBoolValue("inventory", "flashlight_gauge", true);
 	overlay::flashGaugeMax = static_cast<int>(config.GetLongValue("inventory", "flashlight_gauge_max", 0));
@@ -1117,6 +1543,7 @@ static void load_config() {
 	if (overlay::flashGaugeFade < 0.0f) overlay::flashGaugeFade = 0.0f;
 	if (overlay::flashGaugeFade > overlay::flashGaugeSeconds) overlay::flashGaugeFade = overlay::flashGaugeSeconds;
 	overlay::flashGaugeNumbers = config.GetBoolValue("inventory", "flashlight_gauge_numbers", false);
+	overlay::flashUpgradedDays = static_cast<float>(config.GetDoubleValue("inventory", "upgraded_days", 60.0));
 	{
 		const std::string gsk = ToLower(config.GetValue("inventory", "flashlight_gauge_skin", "subtle"));
 		overlay::flashGaugeSkin = (gsk == "subtle") ? 1 : (gsk == "custom") ? 2 : 0;
@@ -1172,9 +1599,28 @@ static void load_config() {
 	overlay::notesAutoOpen = config.GetBoolValue("notes", "open_with_phone", false);
 	overlay::notesFontScale = static_cast<float>(config.GetDoubleValue("notes", "font_scale", 1.0));
 	overlay::hintsEnabled = config.GetBoolValue("overlay", "hotkey_tips", true);
-	overlay::tipFade = config.GetBoolValue("overlay", "tip_fade", false);
+	overlay::tipFade = config.GetBoolValue("overlay", "tip_fade", true);
 	overlay::tipFadeSeconds = static_cast<float>(config.GetDoubleValue("overlay", "tip_fade_seconds", 8.0));
 	overlay::saveLayout = config.GetBoolValue("overlay", "save_layout", true);
+	{
+		const char* bc = config.GetValue("overlay", "border_color", "");
+		float r = -1, g = -1, b = -1, a = -1;
+		if (bc != nullptr && bc[0] != '\0') {
+			int ri = -1, gi = -1, bi = -1, ai = -1;
+			sscanf_s(bc, " %d , %d , %d , %d", &ri, &gi, &bi, &ai);
+			if (ri >= 0 && gi >= 0 && bi >= 0) { r = ri / 255.0f; g = gi / 255.0f; b = bi / 255.0f; }
+			if (ai >= 0) a = ai / 255.0f;
+			if (ri < 0) { int aOnly = -1; if (sscanf_s(bc, " , , , %d", &aOnly) == 1 && aOnly >= 0) a = aOnly / 255.0f; }
+		}
+		overlay::borderColor[0] = r; overlay::borderColor[1] = g;
+		overlay::borderColor[2] = b; overlay::borderColor[3] = a;
+	}
+	{
+		const char* ac = config.GetValue("overlay", "edit_autoclose", "10");
+		overlay::editAutoCloseSecs = (ac != nullptr && ac[0] != '\0') ? atoi(ac) : 0;
+		if (overlay::editAutoCloseSecs < 0) overlay::editAutoCloseSecs = 0;
+	}
+	overlay::autoAlignCorners = config.GetBoolValue("overlay", "auto_align", false);
 	overlay::forceBackbuffer = config.GetBoolValue("experimental", "force_backbuffer_render", false);
 	overlay::usePresentRender = config.GetBoolValue("experimental", "present_render", false);
 	mod::functional_camera::engineCounterProbe = config.GetBoolValue("experimental", "engine_counter_probe", false);
@@ -1230,6 +1676,46 @@ static void load_config() {
 	overlay::calcEnabled = config.GetBoolValue("calculator", "enabled", true);
 	overlay::endingEnabled = config.GetBoolValue("ending", "enabled", true);
 	overlay::contactEnabled = config.GetBoolValue("contact_sheet", "enabled", true);
+	{
+		const char* cs = config.GetValue("contact_sheet", "sort", "name");
+		overlay::csSort = (_stricmp(cs, "date_new") == 0 || _stricmp(cs, "newest") == 0) ? 1
+			: (_stricmp(cs, "date_old") == 0 || _stricmp(cs, "oldest") == 0) ? 2 : 0;
+	}
+	overlay::srShowTimer = config.GetBoolValue("speedrun", "show_timer", false);
+	overlay::srCountDeaths = config.GetBoolValue("speedrun", "count_deaths", false);
+	overlay::srShowVelocity = config.GetBoolValue("speedrun", "show_velocity", false);
+	overlay::srVelOffset = static_cast<unsigned int>(strtoul(config.GetValue("speedrun", "velocity_offset", "0x168"), nullptr, 0));
+	overlay::srShowPos = config.GetBoolValue("speedrun", "show_position", false);
+	overlay::srPosAxis = config.GetBoolValue("speedrun", "position_axis", false);
+	overlay::srPosOffset = static_cast<unsigned int>(strtoul(config.GetValue("speedrun", "position_offset", "0x2C"), nullptr, 0));
+	overlay::srProbeOffset = static_cast<unsigned int>(strtoul(config.GetValue("speedrun", "probe_offset", ""), nullptr, 0));
+	overlay::srProbeCount = static_cast<int>(config.GetLongValue("speedrun", "probe_count", 8));
+	overlay::srScanOffsets = config.GetBoolValue("speedrun", "scan_offsets", false);
+	overlay::ResetOffsetScan(); // fresh min/max tracking each reload
+	overlay::srDeathToast = config.GetBoolValue("speedrun", "death_toast", false);
+	overlay::srPanelX = static_cast<int>(config.GetLongValue("speedrun", "panel_x", 12));
+	overlay::srPanelY = static_cast<int>(config.GetLongValue("speedrun", "panel_y", 12));
+	overlay::srBgAlpha = static_cast<float>(config.GetDoubleValue("speedrun", "bg_alpha", 0.35));
+	overlay::srScale = static_cast<float>(config.GetDoubleValue("speedrun", "scale", 1.0));
+	overlay::srHealthOffset = static_cast<unsigned int>(strtoul(config.GetValue("speedrun", "health_offset", ""), nullptr, 0));
+	overlay::srInReport = config.GetBoolValue("speedrun", "timer_in_report", true);
+	overlay::showHealthBar = config.GetBoolValue("health", "show_bar", false);
+	overlay::healthMax = static_cast<int>(config.GetLongValue("health", "max", 100));
+	overlay::healthFillGradient = config.GetBoolValue("health", "fill_gradient", true);
+	overlay::healthBarPx = static_cast<int>(config.GetLongValue("health", "bar_px", 110));
+	overlay::healthNoBg = config.GetBoolValue("health", "no_background", false);
+	overlay::healthShowHp = config.GetBoolValue("health", "show_hp", true);
+	{
+		int cr, cg, cb;
+		cr = 95; cg = 225; cb = 110; sscanf_s(config.GetValue("health", "fill_full", "95,225,110"), " %d , %d , %d", &cr, &cg, &cb);
+		overlay::healthFillFull[0] = cr / 255.0f; overlay::healthFillFull[1] = cg / 255.0f; overlay::healthFillFull[2] = cb / 255.0f;
+		cr = 220; cg = 60; cb = 55; sscanf_s(config.GetValue("health", "fill_low", "220,60,55"), " %d , %d , %d", &cr, &cg, &cb);
+		overlay::healthFillLow[0] = cr / 255.0f; overlay::healthFillLow[1] = cg / 255.0f; overlay::healthFillLow[2] = cb / 255.0f;
+		cr = 38; cg = 40; cb = 46; sscanf_s(config.GetValue("health", "empty_color", "38,40,46"), " %d , %d , %d", &cr, &cg, &cb);
+		overlay::healthEmpty[0] = cr / 255.0f; overlay::healthEmpty[1] = cg / 255.0f; overlay::healthEmpty[2] = cb / 255.0f;
+	}
+	// Drop the cached silhouette so a reload re-reads a swapped health.svg / bar_px.
+	overlay::ReleaseHealthTexture();
 	g_LogVerbose = config.GetBoolValue("log", "verbose", false);
 	overlay::watermark = config.GetBoolValue("watermark", "enabled", true);
 	overlay::watermarkCorner = static_cast<int>(config.GetLongValue("watermark", "corner", 3));
@@ -1237,6 +1723,10 @@ static void load_config() {
 	g_ReportEnabled = config.GetBoolValue("report", "enabled", true);
 	g_ReportSeconds = static_cast<float>(config.GetDoubleValue("report", "popup_seconds", 12.0));
 	overlay::debugReportKey = ParseKeyValue(config.GetValue("report", "debug_trigger", ""), 0);
+	overlay::rpShowReading = config.GetBoolValue("report", "show_reading", true);
+	overlay::rpShowPickups = config.GetBoolValue("report", "show_pickups", true);
+	overlay::startMapToken = ToLower(config.GetValue("report", "start_map", "infra_c1_m1_office"));
+	overlay::rpResetOnStart = config.GetBoolValue("report", "reset_on_start", true);
 	{
 		g_ReportTokens.clear();
 		std::string list = config.GetValue("report", "ending_maps", "infra_c11_ending_1,infra_c11_ending_2,infra_c11_ending_3");
@@ -1423,9 +1913,14 @@ static void DoGenerateSurveyReport(const char* map_name) {
 	int totCur = 0, totMax = 0;
 	std::string rows;
 	int pct[overlay::CategoryCount] = { 0 };
+	// Whole-campaign totals (summed from persisted global-state), so the report is
+	// precise across the entire run rather than just the ending map.
+	int camp_cur[overlay::CategoryCount] = { 0 };
+	int camp_max[overlay::CategoryCount] = { 0 };
+	mod::counters::ComputeCampaignTotals(camp_cur, camp_max);
 	for (int i = 0; i < overlay::CategoryCount; ++i) {
-		const int cur = mod::counters::GetCategoryCurrent(i);
-		const int mx = mod::counters::GetCategoryMax(i);
+		const int cur = camp_cur[i];
+		const int mx = camp_max[i];
 		pct[i] = mx > 0 ? (cur * 100 / mx) : 0;
 		totCur += cur; totMax += mx;
 		char line[96];
@@ -1454,10 +1949,32 @@ static void DoGenerateSurveyReport(const char* map_name) {
 		fprintf(f, "Date     : %s\r\n", overlay::surveyDate.c_str());
 		fprintf(f, "Site     : %s\r\n", site.c_str());
 		fprintf(f, "Map      : %s\r\n\r\n", map_name);
+		fprintf(f, "Run type : %s\r\n", overlay::runFromStart
+			? "Full run (from start)"
+			: "PARTIAL - started mid-game (chapter select / loaded save)");
+		if (!overlay::runFromStart && !overlay::runOriginMap.empty()) {
+			fprintf(f, "Started  : %s\r\n", overlay::runOriginMap.c_str());
+		}
+		fprintf(f, "\r\n");
 		fprintf(f, "%s\r\n", rows.c_str());
 		fprintf(f, "Overall  : %d / %d (%d%%)\r\n\r\n", totCur, totMax, totPct);
 		fprintf(f, "Outlook  : %s\r\n", verdict.c_str());
-		fprintf(f, "\r\nNote: the game scores each Act separately; these are overall totals.\r\n");
+		if (overlay::rpShowReading) {
+			const unsigned long long rs = mod::inventory::ReadingElapsedMs() / 1000;
+			fprintf(f, "Reading  : %llu:%02llu (m:ss)\r\n", rs / 60, rs % 60);
+		}
+		if (overlay::rpShowPickups) {
+			int favN = 0;
+			const std::string fav = mod::inventory::FavoritePickup(favN);
+			fprintf(f, "Pickups  : %d\r\n", mod::inventory::TotalPickups());
+			if (!fav.empty()) fprintf(f, "Favorite : %s x%d\r\n", fav.c_str(), favN);
+		}
+		fprintf(f, "\r\nNote: totals are summed across the whole campaign from saved\r\n");
+		fprintf(f, "progress (per-map global-state), not just this map.\r\n");
+		if (!overlay::runFromStart) {
+			fprintf(f, "This run is PARTIAL - totals cover only the chapters actually\r\n");
+			fprintf(f, "played in this save; it did not begin at the office.\r\n");
+		}
 		fclose(f);
 	}
 
@@ -1469,6 +1986,12 @@ static void DoGenerateSurveyReport(const char* map_name) {
 }
 
 void __fastcall InitMapStats(void* this_ptr) {
+	// [overlay] auto_align: re-snap counters + inventory to their corners on every
+	// map load, re-measured at their current size.
+	if (overlay::autoAlignCorners) {
+		overlay::forceReposition = true;
+	}
+
 	InitMapStats_orig(this_ptr);
 	// A save/level load rebuilds the texture cache; drop any latched photo so it
 	// can't fire against a stale freeze-frame.
@@ -1482,6 +2005,40 @@ void __fastcall InitMapStats(void* this_ptr) {
 
 	if (g_SuccessCountersEnabled) {
 		mod::counters::InitMapStats();
+	}
+
+	// ----- Run-origin detection (report validity), persisted in the save -----
+	// Validity rides on Source global-state: the office plants a marker, every
+	// load reads it back. Global-state is serialized into the save and reset on
+	// New Game, so an office-started run stays valid across quit/reload and
+	// multiple sittings; a chapter-select / mid-game load has no marker.
+	{
+		const char* rmn = g_Engine ? g_Engine->get_map_name() : nullptr;
+		const std::string rlm = rmn ? ToLower(rmn) : std::string();
+		const bool inMenu = (g_Engine != nullptr) && g_Engine->is_in_main_menu();
+		if (inMenu) {
+			overlay::runOriginMap.clear(); // between runs; next gameplay map re-reads
+		} else if (rlm.rfind("infra_c", 0) == 0) {
+			const bool freshOffice = (rlm == overlay::startMapToken) && overlay::runOriginMap.empty();
+			if (freshOffice) {
+				mod::counters::MarkRunOrigin(); // persists in the save's global-state
+				if (overlay::rpResetOnStart) {
+					overlay::ResetRun();
+					mod::inventory::ResetPickups();
+				}
+				LogI("run: office start - marked origin + reset session stats");
+			}
+			const bool wasValid = overlay::runFromStart;
+			overlay::runFromStart = mod::counters::IsRunOriginMarked();
+			if (overlay::runOriginMap.empty()) {
+				overlay::runOriginMap = rlm;
+				LogI(std::string("run: first map = ") + rlm +
+					(overlay::runFromStart ? "  (valid: office-origin marker present in save)"
+					                       : "  (PARTIAL: no marker - chapter select / mid-game load)"));
+			} else if (wasValid != overlay::runFromStart) {
+				LogI(std::string("run: validity now ") + (overlay::runFromStart ? "FULL" : "PARTIAL"));
+			}
+		}
 	}
 
 	mod::inventory::MapLoaded(g_Engine->get_map_name());
@@ -1534,6 +2091,80 @@ int __fastcall CInfraCameraFreezeFrame__OnCommand(CInfraCameraFreezeFrame* thiz,
 	return ret;
 }
 
+// ===== EXPERIMENTAL: low-level keyboard hook input path =====
+// Some systems never deliver key messages to the overlay's subclassed WndProc
+// (raw input, exclusive fullscreen, focus/driver quirks), and GetAsyncKeyState
+// polling can be gated out too. A WH_KEYBOARD_LL hook captures key-downs at the
+// OS level, before the game sees them, on a dedicated thread with its own
+// message pump. Keys are latched and dispatched on the render thread (EndScene)
+// for thread-safety, and gated to our own process so it never fires while you're
+// in another app. Verbose logs EVERY key it sees, so a tester can confirm the
+// hook is receiving input at all (press anything and watch for "lowlevel: key").
+static HHOOK  g_LLHook = nullptr;
+static HANDLE g_LLThread = nullptr;
+static DWORD  g_LLThreadId = 0;
+static std::mutex g_LLMx;
+static std::vector<int> g_LLPending;
+
+static LRESULT CALLBACK LowLevelKbProc(int code, WPARAM wParam, LPARAM lParam) {
+	if (code == HC_ACTION && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN)) {
+		const KBDLLHOOKSTRUCT* k = reinterpret_cast<const KBDLLHOOKSTRUCT*>(lParam);
+		DWORD fgPid = 0;
+		GetWindowThreadProcessId(GetForegroundWindow(), &fgPid);
+		const bool ours = (fgPid == GetCurrentProcessId());
+		if (g_LogVerbose) {
+			char b[64];
+			sprintf_s(b, sizeof(b), "lowlevel: key vk=0x%02X (%s)", static_cast<int>(k->vkCode), ours ? "ours" : "other-app");
+			LogV(b);
+		}
+		if (ours) {
+			std::lock_guard<std::mutex> lk(g_LLMx);
+			g_LLPending.push_back(static_cast<int>(k->vkCode));
+		}
+	}
+	return CallNextHookEx(nullptr, code, wParam, lParam);
+}
+
+static DWORD WINAPI LowLevelHookThread(LPVOID) {
+	g_LLHook = SetWindowsHookExA(WH_KEYBOARD_LL, LowLevelKbProc, GetModuleHandleA(nullptr), 0);
+	if (g_LLHook == nullptr) {
+		LogE("lowlevel: SetWindowsHookEx(WH_KEYBOARD_LL) failed");
+		return 0;
+	}
+	LogI("lowlevel: keyboard hook installed");
+	MSG msg;
+	while (GetMessage(&msg, nullptr, 0, 0) > 0) { /* pump so the LL hook fires */ }
+	UnhookWindowsHookEx(g_LLHook);
+	g_LLHook = nullptr;
+	LogI("lowlevel: keyboard hook removed");
+	return 0;
+}
+
+static void StartLowLevelHook() {
+	if (g_LLThread != nullptr) return;
+	g_LLThread = CreateThread(nullptr, 0, LowLevelHookThread, nullptr, 0, &g_LLThreadId);
+}
+
+static void StopLowLevelHook() {
+	if (g_LLThreadId != 0) PostThreadMessageA(g_LLThreadId, WM_QUIT, 0, 0);
+	if (g_LLThread != nullptr) {
+		WaitForSingleObject(g_LLThread, 1000);
+		CloseHandle(g_LLThread);
+		g_LLThread = nullptr;
+	}
+	g_LLThreadId = 0;
+}
+
+static void DrainLowLevelKeys() {
+	std::vector<int> keys;
+	{
+		std::lock_guard<std::mutex> lk(g_LLMx);
+		if (g_LLPending.empty()) return;
+		keys.swap(g_LLPending);
+	}
+	for (int vk : keys) overlay::DispatchHotkey(vk);
+}
+
 HRESULT __stdcall EndScene(const LPDIRECT3DDEVICE9 pDevice) {
 	// Live ini reload requested via hotkey (handled here, on the render thread).
 	if (overlay::reloadRequested) {
@@ -1558,12 +2189,17 @@ HRESULT __stdcall EndScene(const LPDIRECT3DDEVICE9 pDevice) {
 	// Re-resolve inventory counters if the map loaded before the player existed
 	// (fixes empty inventory + dead gauge after chapter loads).
 	mod::inventory::RetryTick();
+	mod::inventory::PickupTick();
+	overlay::TickFlashlightBattery();
 
 	// Experimental input fallback: poll hotkeys when window messages don't reach
 	// the overlay on some systems.
 	if (overlay::useHotkeyPolling) {
 		overlay::PollHotkeys();
 	}
+	// Drain any keys captured by the experimental low-level keyboard hook.
+	if (g_UseLowLevelHook) DrainLowLevelKeys();
+	overlay::TickSpeedrun();
 
 	// *** DEBUG ONLY *** force the end-of-game report via the [report]
 	// debug_trigger key. Serviced here (per frame) so it fires immediately, not
@@ -1596,8 +2232,9 @@ void MaybeRenderOverlay(LPDIRECT3DDEVICE9 pDevice) {
 	// in-menu path draws nothing but the watermark).
 	overlay::inMenu = g_Engine->is_in_main_menu() && !g_Engine->loading_screen_visible();
 
+	const bool binoWants = overlay::binoEnabled && !g_Engine->is_in_main_menu() && !g_Engine->loading_screen_visible();
 	if ((anyOverlay && overlay::shown && !g_Engine->is_in_main_menu() && !g_Engine->loading_screen_visible())
-		|| (overlay::watermark && overlay::inMenu)) {
+		|| (overlay::watermark && overlay::inMenu) || binoWants) {
 		overlay::Render(Base::Data::hWindow, pDevice);
 	}
 }
@@ -1724,6 +2361,8 @@ bool Base::Hooks::Shutdown() {
 	MH_RemoveHook(pEndScene);
 
 	SetWindowLongPtr(Data::hWindow, WNDPROC_INDEX, (LONG_PTR)Data::oWndProc);
+
+	StopLowLevelHook();
 
 	MH_Uninitialize();
 	return true;

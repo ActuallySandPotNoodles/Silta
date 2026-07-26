@@ -1,4 +1,5 @@
 #pragma once
+#include <string>
 #include "stdafx.h"
 
 namespace mod {
@@ -24,6 +25,31 @@ namespace mod {
 		// load (chapter loads can run InitMapStats before the player entity
 		// exists), retry once a second until they do.
 		void RetryTick();
+
+		// Novelty pickup counter: polls the held object each frame and counts each
+		// NEW pickup whose name contains overlay::invPickupWatch (case-insensitive).
+		// e.g. set the watch to "osmo" to tally the beers Mark grabs.
+		void PickupTick();
+		int  PickupCount();
+		void ResetPickups();
+
+		// End-report stats, accumulated by PickupTick():
+		//  - reading time: wall time with a document open (currentDocument valid),
+		//  - total pickups: every distinct held-object grab (by handle change),
+		//  - favorite: the most-grabbed key (friendly/name/model).
+		unsigned long long ReadingElapsedMs();
+		int  TotalPickups();
+		std::string FavoritePickup(int& outCount); // "" if nothing grabbed yet
+
+		// On-demand full identity of the currently-held object -> silta.log + toast
+		// (bound to [hotkeys] dump_held). Helps map a pickup's id for [pickup_names].
+		void DumpHeldObject();
+
+		// [pickup_names] friendly-name table: map a targetname or model basename to
+		// a readable label (e.g. valve_mdl -> Orange Valve, brick.mdl -> Brick).
+		void ClearPickupNames();
+		void AddPickupName(const char* key, const char* friendly);
+		std::string LookupPickupName(const std::string& id);
 
 		void MapLoaded(const char *name);
 	}

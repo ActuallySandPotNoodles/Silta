@@ -141,6 +141,12 @@ Everything below is configurable (or fully disableable) in `silta.ini`.
   Three skins (default / subtle / custom colors), smooth fade-out, numbers toggle.
 - **Hotkey tip bar** — sorted F1..F12; **draggable overlays** (F11 unlock) with a curated
   default layout and positions saved across sessions; version watermark in the main menu.
+- **Health bar** — a Max-Payne-style Mark Siltanen silhouette that fills bottom-up as a mask,
+  colouring low->full via configurable RGB (defaults to INFRA's bioluminescent-mushroom green),
+  with an optional liquid gradient, a no-background mode and a toggleable HP number. The
+  silhouette is a vector (NanoSVG) baked into the DLL, so it stays crisp at any `bar_px` size.
+  Drop **any** `.svg` next to the game exe to swap the figure (name doesn't matter; only the
+  shape is used, the bar tints it); with none present the embedded Mark vector is used.
 
 ## Hotkeys (defaults, all rebindable)
 
@@ -175,3 +181,14 @@ marker in `silta.log`.
   banner, field calculator (4 modes + skins + live Style tab), sketchbook, notes,
   real-time flashlight gauge (draggable), per-window layouts, custom skins, verbose
   logging with crash marker, menu watermark. First public release will be v1.0.
+
+## Known limitations
+
+- **Photo capture can fail after a save-load, death, or alt-tab, on some maps.** The camera
+  reads the game's freeze-frame texture; when the game rebuilds its texture dictionary
+  (which those events trigger) the freeze-frame can be stale or, on certain maps, have no
+  usable backing texture at all. SILTA detects this and **skips the shot cleanly (no crash,
+  no corrupt file)** with an on-screen notice. A reload or moving to a different spot often
+  restores it; a few maps don't recover until a map transition. This is a limitation of the
+  game's render-texture lifecycle, not a bug introduced by the mod — it affects the capture
+  the same way the original camera code did.

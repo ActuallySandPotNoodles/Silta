@@ -10,14 +10,28 @@
 #include <cctype>
 #include <cmath>
 #include <initializer_list>
+#include <vector>
 #include "brad.h" // quack
+
+// NanoSVG (header-only, MIT). Implementation lives in this one TU. Wrapped in a
+// warning barrier so the vendored C headers don't trip the project's warnings.
+#pragma warning(push, 0)
+#define NANOSVG_IMPLEMENTATION
+#define NANOSVGRAST_IMPLEMENTATION
+#include <nanosvg/nanosvg.h>
+#include <nanosvg/nanosvgrast.h>
+#pragma warning(pop)
+#include <resource.h> // IDR_HEALTH_SVG
 
 void LogI(const std::string&); // silta.log (defined in infra.cpp)
 void LogV(const std::string&); // silta.log verbose (defined in infra.cpp)
 #include "inventory.h"
 #include "counters.h"
 #include "functional_camera.h"
+#include "infra.h"
+using infra::Engine;
 #include <map>
+#include <set>
 #include <algorithm>
 #include <climits>
 
@@ -50,6 +64,39 @@ ImVec4 overlay::inventoryColor[3] = {
 	ImVec4(1.00f, 0.85f, 0.43f, 1.00f), // OS coins   - gold
 };
 bool   overlay::invBatteryIcons = true;
+bool   overlay::invShowHeld = false;
+bool   overlay::invShowFlashlightUpgrade = false;
+std::string overlay::invPickupWatch = "";
+std::string overlay::invPickupLabel = "Picked up";
+bool  overlay::binoEnabled = true;
+int   overlay::binoKey = 0x04;      // VK_MBUTTON
+bool  overlay::binoToggle = true;
+bool  overlay::binoHidePhone = true;
+bool  overlay::binoHideFlash = false;
+unsigned int overlay::binoCamOffset = 0;
+int   overlay::binoOpacity = 255;
+int   overlay::binoSoftness = 24;
+float overlay::binoRadius = 0.46f;
+float overlay::binoSeparation = 0.13f;
+float overlay::binoColor[3] = { 0.0f, 0.0f, 0.0f };
+int   overlay::binoFadeMs = 120;
+bool  overlay::binoSound = true;
+std::string overlay::binoSoundDeploy = "Item.Deploy";
+std::string overlay::binoSoundHolster = "Item.Holster";
+unsigned int overlay::binoPhoneWeaponOffset = 0;
+std::string  overlay::binoPhoneClass = "infra_phone";
+bool         overlay::binoFovGate = false;
+unsigned int overlay::binoFovOffset = 0xC10;
+int          overlay::binoFovZoomMax = 60;
+bool  overlay::showHealthBar = false;
+int   overlay::healthMax = 100;
+bool  overlay::healthFillGradient = true;
+int   overlay::healthBarPx = 110;
+bool  overlay::healthNoBg = false;
+bool  overlay::healthShowHp = true;
+float overlay::healthFillFull[3] = { 95.0f/255.0f, 225.0f/255.0f, 110.0f/255.0f }; // mushroom green
+float overlay::healthFillLow[3]  = { 220.0f/255.0f, 60.0f/255.0f, 55.0f/255.0f };  // red
+float overlay::healthEmpty[3]    = { 38.0f/255.0f, 40.0f/255.0f, 46.0f/255.0f };   // drained
 bool   overlay::inventoryHiddenByMap = false;
 bool   overlay::countersFocusFade = false;
 bool   overlay::invFocusFade = false;
@@ -62,6 +109,7 @@ int    overlay::flashGaugeMax = 0; // 0 = auto
 float  overlay::flashGaugeSeconds = 3.0f;
 float  overlay::flashGaugeFade = 0.4f;
 bool   overlay::flashGaugeNumbers = false;
+float overlay::flashUpgradedDays = 60.0f;
 int    overlay::flashGaugeSkin = 1; // subtle
 float  overlay::gaugeX = -1.0f;
 float  overlay::gaugeY = -1.0f;
@@ -91,7 +139,7 @@ ImVec4 overlay::sketchHead    = ImVec4(0.078f, 0.118f, 0.294f, 1.00f);
 bool   overlay::notesAutoOpen = false;
 float  overlay::notesFontScale = 1.0f;
 bool   overlay::hintsEnabled = true;
-bool   overlay::tipFade = false;
+bool   overlay::tipFade = true;
 float  overlay::tipFadeSeconds = 8.0f;
 bool   overlay::saveLayout = true;
 bool   overlay::canonLabels = false;
@@ -172,6 +220,9 @@ int  overlay::catMax[overlay::CategoryCount] = { 0 };
 int  overlay::currentAct = 1;
 bool overlay::locked = true;
 bool overlay::forceReposition = false;
+float overlay::borderColor[4] = { -1.0f, -1.0f, -1.0f, -1.0f }; // <0 = use theme default
+int   overlay::editAutoCloseSecs = 10;
+bool  overlay::autoAlignCorners = false;
 bool overlay::reloadRequested = false;
 int overlay::debugReportKey = 0;
 volatile bool overlay::forceReportRequested = false;
@@ -224,9 +275,19 @@ static void ApplyTheme() {
 		style.Colors[ImGuiCol_WindowBg] = ImVec4(0.00f, 0.00f, 0.00f, 1.00f);
 		style.Colors[ImGuiCol_Border]   = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
 	}
+	// [overlay] border_color override (any component >= 0 activates; alpha alone
+	// works too, e.g. "border_color = , , , 0" to hide the border entirely).
+	if (overlay::borderColor[0] >= 0.0f || overlay::borderColor[3] >= 0.0f) {
+		ImVec4 c = style.Colors[ImGuiCol_Border];
+		if (overlay::borderColor[0] >= 0.0f) { c.x = overlay::borderColor[0]; c.y = overlay::borderColor[1]; c.z = overlay::borderColor[2]; }
+		if (overlay::borderColor[3] >= 0.0f) { c.w = overlay::borderColor[3]; }
+		style.Colors[ImGuiCol_Border] = c;
+	}
 }
 
 // Anchor a window of the given size to a screen corner, inset by `margin`.
+static float g_CountersRenderedH = 0.0f; // last counters window height (inventory stacking)
+
 static ImVec2 CornerPos(overlay::Corner corner, float winW, float winH, int clientW, int clientH) {
 	const float m = static_cast<float>(overlay::margin);
 	const bool left = (corner == overlay::Corner::TopLeft || corner == overlay::Corner::BottomLeft);
@@ -300,6 +361,7 @@ overlay::OverlayLine_t::OverlayLine_t(std::string name, std::string value, const
 }
 
 bool overlay::shown = true;
+int  overlay::csSort = 0;          // contact sheet sort: 0 name, 1 newest, 2 oldest
 bool overlay::countersEnabled = true;
 bool overlay::inventoryEnabled = true;
 overlay::OverlayLine_t overlay::title = overlay::OverlayLine_t();
@@ -311,8 +373,14 @@ int overlay::fontSize = 0;
 // fixed size (clean HUD). Unlocked = shows a title bar (a clear drag handle) and
 // auto-sizes, so it can be dragged with the mouse while the cursor is free (e.g.
 // phone/menu out). Locking or a reset snaps it back to the configured corner.
-static void BeginAnchoredWindow(const char* name, const ImVec2& size, overlay::Corner corner, int clientW, int clientH) {
-	const ImVec2 pos = CornerPos(corner, size.x, size.y, clientW, clientH);
+static void BeginAnchoredWindow(const char* name, const ImVec2& size, overlay::Corner corner, int clientW, int clientH, float stackOffsetY = 0.0f) {
+	ImVec2 pos = CornerPos(corner, size.x, size.y, clientW, clientH);
+	// Stacking: push the window away from the corner along Y (down for top
+	// corners, up for bottom) so two windows sharing a corner don't overlap.
+	if (stackOffsetY != 0.0f) {
+		const bool top = (corner == overlay::Corner::TopLeft || corner == overlay::Corner::TopRight);
+		pos.y += top ? stackOffsetY : -stackOffsetY;
+	}
 
 	ImGuiWindowFlags flags =
 		ImGuiWindowFlags_NoCollapse |
@@ -322,14 +390,17 @@ static void BeginAnchoredWindow(const char* name, const ImVec2& size, overlay::C
 		flags |= ImGuiWindowFlags_NoSavedSettings;
 	}
 
+	// No title bar in either state (it read as an ugly black bar). When unlocked
+	// the window is moved by dragging its body instead; NoMove is only set locked.
+	flags |= ImGuiWindowFlags_NoTitleBar;
 	if (overlay::locked) {
-		flags |= ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoTitleBar;
+		flags |= ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove;
 		// Keep the current (possibly dragged) position; only snap on an explicit
 		// reset/corner-cycle (forceReposition).
 		ImGui::SetNextWindowPos(pos, overlay::forceReposition ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
 		ImGui::SetNextWindowSize(size, ImGuiCond_Always);
 	} else {
-		// Title bar acts as the drag handle; auto-resize keeps content fitting.
+		// Draggable by the window body (NoMove unset); auto-resize keeps it tidy.
 		flags |= ImGuiWindowFlags_AlwaysAutoResize;
 		ImGui::SetNextWindowPos(pos, overlay::forceReposition ? ImGuiCond_Always : ImGuiCond_FirstUseEver);
 	}
@@ -493,6 +564,7 @@ static void RenderCounters() {
 		ImGui::TextColored(overlay::titleColor, totalStr.c_str());
 	}
 
+	g_CountersRenderedH = ImGui::GetWindowSize().y; // for inventory stacking
 	ImGui::End();
 }
 
@@ -573,6 +645,21 @@ static void RenderInventory() {
 		drawIcon.push_back(overlay::invCoinIcon && cv > 0);   // coin glyph only once collected
 	}
 
+	// Held object (E key). DT_INFRA_Player heldObject @ 0x189C, resolved to a name.
+	if (overlay::invShowHeld) {
+		std::string held = Engine()->GetHeldObjectName();
+		if (!held.empty()) {
+			lines.push_back(std::string("Holding: ") + held);
+			colors.push_back(overlay::inventoryColor[0]); kinds.push_back(2); drawIcon.push_back(false);
+		}
+	}
+
+	// Novelty pickup tally (e.g. watch "osmo" to count beers grabbed).
+	if (!overlay::invPickupWatch.empty()) {
+		lines.push_back(overlay::invPickupLabel + ": " + std::to_string(mod::inventory::PickupCount()));
+		colors.push_back(overlay::inventoryColor[2]); kinds.push_back(2); drawIcon.push_back(false);
+	}
+
 	if (lines.empty()) {
 		return;
 	}
@@ -588,7 +675,12 @@ static void RenderInventory() {
 	const int clientWidth = Base::Data::HACK_clientRect.right - Base::Data::HACK_clientRect.left;
 	const int clientHeight = Base::Data::HACK_clientRect.bottom - Base::Data::HACK_clientRect.top;
 
-	BeginAnchoredWindow("Inventory", ImVec2(windowWidth, windowHeight), overlay::inventoryCorner, clientWidth, clientHeight);
+	float invStackOffset = 0.0f;
+	if (overlay::autoAlignCorners && overlay::countersEnabled &&
+		overlay::inventoryCorner == overlay::countersCorner && g_CountersRenderedH > 0.0f) {
+		invStackOffset = g_CountersRenderedH + 8.0f; // sit clear of the counters window
+	}
+	BeginAnchoredWindow("Inventory", ImVec2(windowWidth, windowHeight), overlay::inventoryCorner, clientWidth, clientHeight, invStackOffset);
 	if (overlay::invFocusFade) {
 		g_FocusInv.hovered = CursorIsVisible() && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
 	}
@@ -622,17 +714,50 @@ static bool CursorIsVisible(); // defined below (used for gauge placement)
 //  - COUNT (fallback): without the offset, only the battery COUNT is readable;
 //    the gauge then appears for a few seconds when the count changes
 //    (pickup / battery consumed).
+namespace {
+	float g_FlashOnMs = 0.0f;              // accumulated flashlight-on time (ms), post-upgrade
+	float g_FlashDrainPerSec = 0.0f;      // measured normal-battery drain (charge units/sec)
+	unsigned long long g_FlashLastTick = 0;
+	bool  g_FlashUpgraded = false;
+}
+
+// Accumulate flashlight-on time only once the flashlight is upgraded, so the
+// cosmetic days countdown behaves like the real charge (depletes with F on).
+void overlay::TickFlashlightBattery() {
+	// Always runs so g_FlashUpgraded (used to pick the upgraded vs normal readout)
+	// stays current, regardless of the cosmetic-days setting.
+	bool up = false, on = false;
+	if (!Engine()->GetFlashlightState(up, on)) return;
+	if (up != g_FlashUpgraded) {
+		LogV(up ? "flashlight: upgraded flashlight detected"
+		        : "flashlight: normal flashlight");
+	}
+	g_FlashUpgraded = up;
+	const unsigned long long now = GetTickCount64();
+	if (g_FlashLastTick == 0) g_FlashLastTick = now;
+	unsigned long long dt = now - g_FlashLastTick;
+	g_FlashLastTick = now;
+	if (dt > 1000) dt = 0;               // clamp big gaps (alt-tab / load)
+	if (up && on) g_FlashOnMs += static_cast<float>(dt);
+}
+
 static void RenderFlashlightGauge() {
 	if (!overlay::flashGauge) {
 		return;
 	}
 	const bool live = (mod::inventory::flashlightChargeCounter != nullptr);
+	bool upgradedFull = false;
 	int val = 0;
 	if (live) {
 		val = *mod::inventory::flashlightChargeCounter;
 		if (val < 0 || val > 100000) return; // offset is wrong - don't render garbage
 	} else if (mod::inventory::flashlightBatteriesCounter != nullptr) {
 		val = *mod::inventory::flashlightBatteriesCounter;
+	} else if (g_FlashUpgraded) {
+		// Upgraded flashlight is infinite and may expose no charge/battery counter -
+		// still show the gauge (full) so its interface / cosmetic readout appears.
+		upgradedFull = true;
+		val = 100;
 	} else {
 		return;
 	}
@@ -643,6 +768,20 @@ static void RenderFlashlightGauge() {
 	// Live charge: any decrease = draining right now. Count: any change is news.
 	if (lastVal != INT_MIN && (live ? (val < lastVal) : (val != lastVal))) {
 		showUntil = now + static_cast<double>(overlay::flashGaugeSeconds);
+	}
+	// Estimate the normal battery's drain (charge units/sec) from the interval
+	// between live decreases, so the gauge can show a real "time left". Increases
+	// (battery swaps) are ignored.
+	static double lastChangeT = 0.0;
+	if (live && lastVal != INT_MIN && val != lastVal) {
+		if (val < lastVal && lastChangeT > 0.0) {
+			const double dt = now - lastChangeT;
+			if (dt > 0.10 && dt < 10.0) {
+				const float rate = static_cast<float>(lastVal - val) / static_cast<float>(dt);
+				g_FlashDrainPerSec = (g_FlashDrainPerSec <= 0.0f) ? rate : g_FlashDrainPerSec * 0.7f + rate * 0.3f;
+			}
+		}
+		lastChangeT = now;
 	}
 	lastVal = val;
 	// While overlays are unlocked (F11) the gauge stays visible so it can be
@@ -668,8 +807,8 @@ static void RenderFlashlightGauge() {
 	// of the CURRENT battery (0..100, confirmed at offset 0x184C) and a count
 	// tops out around 10.
 	int mx = overlay::flashGaugeMax;
-	if (mx <= 0) mx = live ? 100 : 10;
-	float pct = static_cast<float>(val) / static_cast<float>(mx);
+	if (mx <= 0) mx = (live || upgradedFull) ? 100 : 10;
+	float pct = upgradedFull ? 1.0f : static_cast<float>(val) / static_cast<float>(mx);
 	if (pct < 0.0f) pct = 0.0f;
 	if (pct > 1.0f) pct = 1.0f;
 
@@ -771,6 +910,36 @@ static void RenderFlashlightGauge() {
 			} else {
 				dl->AddText(ImVec2(x + w + 14.0f - ss.x - 4.0f, y - 15.0f), A(cLabel), spares);
 			}
+		}
+	}
+
+	// Time estimate under the gauge - shown only on the default/custom skins
+	// (the subtle skin stays clean). The UPGRADED flashlight is effectively
+	// infinite, so it shows a cosmetic day countdown from upgraded_days; the
+	// NORMAL flashlight shows the real time until the current battery hits zero,
+	// estimated from its measured live drain rate.
+	if (!subtle) {
+		const float kUpgradedCosmeticLifeMin = 180.0f; // flashlight-on minutes for the cosmetic days to reach 0
+		char tb[28];
+		bool have = false;
+		if (g_FlashUpgraded) {
+			if (overlay::flashUpgradedDays > 0.0f) {
+				const float lifeMs = kUpgradedCosmeticLifeMin * 60000.0f;
+				float frac = (lifeMs > 0.0f) ? (1.0f - g_FlashOnMs / lifeMs) : 1.0f;
+				if (frac < 0.0f) frac = 0.0f;
+				sprintf_s(tb, sizeof(tb), "~ %.0f days", overlay::flashUpgradedDays * frac);
+				have = true;
+			}
+		} else if (live && g_FlashDrainPerSec > 0.001f && val > 0) {
+			const float sec = static_cast<float>(val) / g_FlashDrainPerSec;
+			if (sec >= 60.0f) sprintf_s(tb, sizeof(tb), "~ %d:%02d left", static_cast<int>(sec / 60.0f), static_cast<int>(sec) % 60);
+			else sprintf_s(tb, sizeof(tb), "~ %ds left", static_cast<int>(sec + 0.5f));
+			have = true;
+		}
+		if (have) {
+			const ImVec2 ds = ImGui::CalcTextSize(tb);
+			dl->AddText(ImVec2(x + w * 0.5f - ds.x * 0.5f, y + h + 10.0f),
+				A(IM_COL32(150, 170, 200, 210)), tb);
 		}
 	}
 }
@@ -1192,6 +1361,327 @@ static void RenderToast() {
 
 // End-of-game N.C.G. report card: a larger, centered, themed popup, headed by
 // a font-scaled SILTA wordmark (the mod ships no game artwork).
+// ----- Speedrun timer + death counter -----
+// Wall-clock run timer (accumulates during gameplay, pauses in menu/loading) and
+// an optional death counter. Death detection reads the player's health at a
+// user-supplied offset (from Cheat Engine); the read is SEH-guarded so a wrong
+// offset can't crash. All off by default via [speedrun] in silta.ini.
+bool         overlay::srShowTimer = false;
+bool         overlay::srCountDeaths = false;
+unsigned int overlay::srHealthOffset = 0;
+bool         overlay::srShowVelocity = false;
+unsigned int overlay::srVelOffset = 0;
+bool         overlay::srShowPos = false;
+bool         overlay::srPosAxis = false;
+unsigned int overlay::srPosOffset = 0;
+unsigned int overlay::srProbeOffset = 0;
+int          overlay::srProbeCount = 8;
+bool         overlay::srScanOffsets = false;
+bool         overlay::srDeathToast = false;
+int          overlay::srPanelX = 12;
+int          overlay::srPanelY = 12;
+float        overlay::srBgAlpha = 0.35f;
+float        overlay::srScale = 1.0f;
+bool         overlay::srInReport = true;
+bool         overlay::rpShowReading = true;
+bool         overlay::rpShowPickups = true;
+std::string  overlay::startMapToken = "infra_c1_m1_office";
+bool         overlay::runFromStart = true;
+std::string  overlay::runOriginMap;
+bool         overlay::rpResetOnStart = true;
+
+namespace {
+	unsigned long long g_RunElapsedMs = 0;
+	unsigned long long g_RunLastTick = 0;
+	int g_DeathCount = 0;
+	int g_LastHealth = -1;
+	float g_LastSpeedXY = 0.0f;          // horizontal speed (hammer u/s)
+	float g_LastSpeedZ = 0.0f;           // vertical component
+	bool  g_VelReadOk = false;           // last velocity read succeeded
+	unsigned long long g_VelLogNext = 0; // self-verify log throttle
+	float g_LastPos[3] = { 0.0f, 0.0f, 0.0f };
+	bool  g_PosReadOk = false;
+	unsigned long long g_PosLogNext = 0;
+	unsigned long long g_ProbeLogNext = 0;
+
+	std::string FormatRunTime(unsigned long long ms) {
+		unsigned long long s = ms / 1000;
+		unsigned long long h = s / 3600; s %= 3600;
+		unsigned long long m = s / 60; s %= 60;
+		char b[32];
+		sprintf_s(b, sizeof(b), "%llu:%02llu:%02llu", h, m, s);
+		return std::string(b);
+	}
+
+	// M:SS (minutes unbounded) - for shorter accumulators like reading time.
+	std::string FormatMinSec(unsigned long long ms) {
+		unsigned long long s = ms / 1000;
+		unsigned long long m = s / 60; s %= 60;
+		char b[24];
+		sprintf_s(b, sizeof(b), "%llu:%02llu", m, s);
+		return std::string(b);
+	}
+
+	// SEH-guarded int read at a player-struct offset (used for health + the
+	// optional camera-out flag). No C++ objects in this frame per the __try rule.
+	bool ReadPlayerHealth(void* player, unsigned int off, int& out) {
+		if (off == 0 || off > 0x8000) return false;
+		__try {
+			out = *reinterpret_cast<int*>(reinterpret_cast<char*>(player) + off);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	// SEH-guarded velocity read: 3 contiguous floats (m_vecVelocity) at off.
+	bool ReadPlayerVelocity(void* player, unsigned int off, float out[3]) {
+		if (off == 0 || off > 0x8000) return false;
+		__try {
+			const float* v = reinterpret_cast<const float*>(reinterpret_cast<char*>(player) + off);
+			out[0] = v[0]; out[1] = v[1]; out[2] = v[2];
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	// SEH-guarded read of `count` consecutive floats at a player-struct offset
+	// (position, and the offset-finder probe).
+	bool ReadPlayerFloats(void* player, unsigned int off, float* out, int count) {
+		if (off == 0 || off > 0x8000 || count < 1 || count > 64) return false;
+		__try {
+			const float* v = reinterpret_cast<const float*>(reinterpret_cast<char*>(player) + off);
+			for (int i = 0; i < count; ++i) out[i] = v[i];
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	// ---- Velocity/position offset AUTO-FINDER (no Cheat Engine needed) ----
+	// Sweeps the whole player struct every frame, tracking per-offset the min/max
+	// horizontal magnitude of the Vector3 that starts there, plus its max |x|.
+	// Velocity reads ~0 when still and jumps to a speed when moving (clear swing);
+	// position is a large coordinate that's never ~0 and drifts as you walk.
+	// The user turns this on, walks + stops a few times, and reads the candidate
+	// offsets from silta.log.
+	const int kScanBytes = 0x1800;               // stay within known player fields
+	const int kScanFloats = kScanBytes / 4;
+	float g_ScanMagMin[kScanFloats];
+	float g_ScanMagMax[kScanFloats];
+	float g_ScanCoordMax[kScanFloats];
+	bool  g_ScanInit = false;
+	unsigned long long g_ScanLogNext = 0;
+
+	void ResetScan() {
+		for (int i = 0; i < kScanFloats; ++i) { g_ScanMagMin[i] = 1e30f; g_ScanMagMax[i] = 0.0f; g_ScanCoordMax[i] = 0.0f; }
+		g_ScanInit = true;
+		g_ScanLogNext = 0;
+	}
+
+	// Leaf SEH helper: contains NO C++ object needing unwinding, so the caller
+	// (which builds std::string via LogRaw) doesn't trip C2712.
+	bool SafeReadBlock(void* dst, const void* src, int bytes) {
+		__try {
+			memcpy(dst, src, bytes);
+			return true;
+		} __except (EXCEPTION_EXECUTE_HANDLER) {
+			return false;
+		}
+	}
+
+	void ScanPlayerStruct(void* player) {
+		if (!g_ScanInit) ResetScan();
+		static float buf[kScanFloats];
+		if (!SafeReadBlock(buf, player, kScanBytes)) return;
+		for (int i = 0; i + 2 < kScanFloats; ++i) {
+			const float x = buf[i], y = buf[i + 1], z = buf[i + 2];
+			if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) continue;
+			const float mag = sqrtf(x * x + y * y);
+			if (mag < g_ScanMagMin[i]) g_ScanMagMin[i] = mag;
+			if (mag > g_ScanMagMax[i]) g_ScanMagMax[i] = mag;
+			const float ax = (x < 0.0f) ? -x : x;
+			if (ax > g_ScanCoordMax[i]) g_ScanCoordMax[i] = ax;
+		}
+		const unsigned long long tnow = GetTickCount64();
+		if (tnow < g_ScanLogNext) return;
+		g_ScanLogNext = tnow + 2000;
+		int vshown = 0, pshown = 0;
+		for (int i = 0; i + 2 < kScanFloats && vshown < 6; ++i) {
+			// velocity: was ~0 (standing) and reached a walking/running speed.
+			if (g_ScanMagMin[i] < 5.0f && g_ScanMagMax[i] > 40.0f && g_ScanMagMax[i] < 1200.0f) {
+				char sb[112];
+				sprintf_s(sb, sizeof(sb), "SCAN vel? velocity_offset=0x%X  (still=%.1f moving=%.1f u/s)",
+					i * 4, g_ScanMagMin[i], g_ScanMagMax[i]);
+				LogRaw(sb); vshown++;
+			}
+		}
+		for (int i = 0; i + 2 < kScanFloats && pshown < 6; ++i) {
+			// position: always far from origin (never ~0), finite, and drifted as
+			// you walked (max-min > a few units).
+			if (g_ScanMagMin[i] > 150.0f && g_ScanCoordMax[i] < 100000.0f &&
+				(g_ScanMagMax[i] - g_ScanMagMin[i]) > 8.0f && (g_ScanMagMax[i] - g_ScanMagMin[i]) < 4000.0f) {
+				char sb[112];
+				sprintf_s(sb, sizeof(sb), "SCAN pos? position_offset=0x%X  (range=%.0f..%.0f)",
+					i * 4, g_ScanMagMin[i], g_ScanMagMax[i]);
+				LogRaw(sb); pshown++;
+			}
+		}
+		if (vshown == 0)
+			LogRaw("SCAN: no velocity candidate yet - walk, then stand still, a few times");
+		// Also log EHANDLE offsets on the player that resolve to an INFRA entity
+		// class (weapon/tool). With the phone out this reveals the active-weapon
+		// offset -> set [binocular] phone_weapon_offset to the infra_phone one.
+		if (Engine() != nullptr) Engine()->LogHandleOffsetsMatching("infra_");
+	}
+}
+
+unsigned long long overlay::RunElapsedMs() { return g_RunElapsedMs; }
+int overlay::DeathCount() { return g_DeathCount; }
+void overlay::ResetRun() { g_RunElapsedMs = 0; g_DeathCount = 0; g_LastHealth = -1; }
+
+void overlay::TickSpeedrun() {
+	const unsigned long long now = GetTickCount64();
+	if (g_RunLastTick == 0) g_RunLastTick = now;
+	unsigned long long dt = now - g_RunLastTick;
+	g_RunLastTick = now;
+	if (dt > 1000) dt = 0; // clamp big gaps (alt-tab / load) so time doesn't jump
+
+	const bool inMenu = (Engine() != nullptr) &&
+		(Engine()->is_in_main_menu() || Engine()->loading_screen_visible());
+	if (!inMenu) g_RunElapsedMs += dt;
+
+	const bool wantHealth = overlay::srCountDeaths && overlay::srHealthOffset != 0;
+	const bool wantVel = overlay::srShowVelocity && overlay::srVelOffset != 0;
+	const bool wantPos = overlay::srShowPos && overlay::srPosOffset != 0;
+	const bool wantProbe = overlay::srProbeOffset != 0;
+	const bool wantScan = overlay::srScanOffsets;
+	if ((wantHealth || wantVel || wantPos || wantProbe || wantScan) && Engine() != nullptr) {
+		void* player = Engine()->CGlobalEntityList__FindEntityByName(nullptr, "!player");
+		if (player != nullptr) {
+			if (wantScan) ScanPlayerStruct(player);
+			if (wantVel) {
+				float vel[3] = { 0.0f, 0.0f, 0.0f };
+				if (ReadPlayerVelocity(player, overlay::srVelOffset, vel)) {
+					g_LastSpeedXY = sqrtf(vel[0] * vel[0] + vel[1] * vel[1]);
+					g_LastSpeedZ = vel[2];
+					g_VelReadOk = true;
+					// Self-verify: log raw components ~1/s while moving, so the
+					// offset can be confirmed to produce sane numbers.
+					const unsigned long long tnow = GetTickCount64();
+					if (g_LastSpeedXY > 1.0f && tnow >= g_VelLogNext) {
+						char vb[112];
+						sprintf_s(vb, sizeof(vb), "speedrun: vel = (%.1f, %.1f, %.1f)  xy=%.0f u/s (offset 0x%X)",
+							vel[0], vel[1], vel[2], g_LastSpeedXY, overlay::srVelOffset);
+						LogRaw(vb);
+						g_VelLogNext = tnow + 1000;
+					}
+				} else {
+					g_VelReadOk = false;
+				}
+			}
+			if (wantPos) {
+				float pos[3] = { 0.0f, 0.0f, 0.0f };
+				if (ReadPlayerFloats(player, overlay::srPosOffset, pos, 3)) {
+					g_LastPos[0] = pos[0]; g_LastPos[1] = pos[1]; g_LastPos[2] = pos[2];
+					g_PosReadOk = true;
+					const unsigned long long tnow = GetTickCount64();
+					if (tnow >= g_PosLogNext) {
+						char pb[112];
+						sprintf_s(pb, sizeof(pb), "speedrun: pos = (%.1f, %.1f, %.1f) (offset 0x%X)",
+							pos[0], pos[1], pos[2], overlay::srPosOffset);
+						LogRaw(pb);
+						g_PosLogNext = tnow + 2000;
+					}
+				} else {
+					g_PosReadOk = false;
+				}
+			}
+			if (wantProbe) {
+				// Offset-finder: dump N consecutive floats from probe_offset once
+				// per second. Sweep near health (0x210) while moving to spot the
+				// vector that changes (velocity) or holds big coords (position).
+				const unsigned long long tnow = GetTickCount64();
+				if (tnow >= g_ProbeLogNext) {
+					int cnt = overlay::srProbeCount; if (cnt < 1) cnt = 1; if (cnt > 24) cnt = 24;
+					float fv[24];
+					if (ReadPlayerFloats(player, overlay::srProbeOffset, fv, cnt)) {
+						char pb[512]; int len = 0;
+						len += sprintf_s(pb + len, sizeof(pb) - len, "probe @0x%X:", overlay::srProbeOffset);
+						for (int i = 0; i < cnt && len < static_cast<int>(sizeof(pb)) - 32; ++i)
+							len += sprintf_s(pb + len, sizeof(pb) - len, " [+0x%X]%.2f", overlay::srProbeOffset + i * 4, fv[i]);
+						LogRaw(pb);
+					}
+					g_ProbeLogNext = tnow + 1000;
+				}
+			}
+			int hp = 0;
+			if (wantHealth && ReadPlayerHealth(player, overlay::srHealthOffset, hp)) {
+				if (hp != g_LastHealth) {
+					char hb[48];
+					sprintf_s(hb, sizeof(hb), "speedrun: player health = %d (offset 0x%X)", hp, overlay::srHealthOffset);
+					LogRaw(hb); // always-on when death counting, so the offset is verifiable
+				}
+				if (g_LastHealth > 0 && hp <= 0) {
+					g_DeathCount++;
+					if (overlay::srDeathToast) {
+						char db[48];
+						sprintf_s(db, sizeof(db), "Death #%d", g_DeathCount);
+						ShowToast(db, 3.0f);
+					}
+					LogRaw("speedrun: death detected");
+				}
+				g_LastHealth = hp;
+			}
+		}
+	}
+}
+
+// Restart the offset auto-finder's min/max tracking (called on config reload).
+void overlay::ResetOffsetScan() { ResetScan(); }
+
+void overlay::RenderSpeedrun() {
+	if (!overlay::srShowTimer) return;
+	ImGui::SetNextWindowBgAlpha(overlay::srBgAlpha);
+	ImGui::SetNextWindowPos(ImVec2(static_cast<float>(overlay::srPanelX), static_cast<float>(overlay::srPanelY)), ImGuiCond_FirstUseEver);
+	if (ImGui::Begin("##speedrun", nullptr,
+		ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+		ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+		(overlay::locked ? ImGuiWindowFlags_NoMove : 0))) {
+		if (overlay::srScale != 1.0f) ImGui::SetWindowFontScale(overlay::srScale);
+		ImGui::TextColored(ImVec4(0.85f, 0.89f, 0.97f, 1.0f), "%s", FormatRunTime(g_RunElapsedMs).c_str());
+		if (overlay::srCountDeaths) {
+			ImGui::SameLine();
+			ImGui::TextColored(ImVec4(0.92f, 0.60f, 0.60f, 1.0f), "  Deaths %d", g_DeathCount);
+		}
+		if (overlay::srShowVelocity) {
+			if (overlay::srVelOffset == 0) {
+				ImGui::TextColored(ImVec4(0.80f, 0.72f, 0.52f, 1.0f), "vel: set [speedrun] velocity_offset");
+			} else if (!g_VelReadOk) {
+				ImGui::TextColored(ImVec4(0.85f, 0.55f, 0.55f, 1.0f), "vel: read failed @0x%X", overlay::srVelOffset);
+			} else {
+				ImGui::TextColored(ImVec4(0.62f, 0.86f, 0.68f, 1.0f), "%.0f u/s", g_LastSpeedXY);
+			}
+		}
+		if (overlay::srShowPos) {
+			if (overlay::srPosOffset == 0) {
+				ImGui::TextColored(ImVec4(0.80f, 0.72f, 0.52f, 1.0f), "pos: set [speedrun] position_offset");
+			} else if (!g_PosReadOk) {
+				ImGui::TextColored(ImVec4(0.85f, 0.55f, 0.55f, 1.0f), "pos: read failed @0x%X", overlay::srPosOffset);
+			} else if (overlay::srPosAxis) {
+				ImGui::TextColored(ImVec4(0.70f, 0.80f, 0.92f, 1.0f), "X:%.0f  Y:%.0f  Z:%.0f", g_LastPos[0], g_LastPos[1], g_LastPos[2]);
+			} else {
+				ImGui::TextColored(ImVec4(0.70f, 0.80f, 0.92f, 1.0f), "%.0f  %.0f  %.0f", g_LastPos[0], g_LastPos[1], g_LastPos[2]);
+			}
+		}
+		if (overlay::srProbeOffset != 0) {
+			ImGui::TextColored(ImVec4(0.78f, 0.66f, 0.86f, 1.0f), "probe @0x%X -> silta.log", overlay::srProbeOffset);
+		}
+	}
+	ImGui::End();
+}
+
 static void RenderReport() {
 	if (g_ReportBody.empty() || g_ReportDurationMs <= 0) {
 		return;
@@ -1238,6 +1728,49 @@ static void RenderReport() {
 	ImGui::PopStyleColor();
 	ImGui::Separator();
 	ImGui::TextColored(overlay::fontColor, "%s", g_ReportBody.c_str());
+	ImGui::Spacing();
+	if (overlay::srInReport || overlay::srCountDeaths) {
+		ImGui::Separator();
+		if (overlay::srInReport) {
+			ImGui::TextColored(ImVec4(0.62f, 0.72f, 0.92f, 1.0f), "Run time  %s", FormatRunTime(g_RunElapsedMs).c_str());
+			if (overlay::srCountDeaths) ImGui::SameLine();
+		}
+		if (overlay::srCountDeaths) {
+			ImGui::TextColored(ImVec4(0.92f, 0.60f, 0.60f, 1.0f), "%sDeaths  %d",
+				overlay::srInReport ? "   " : "", g_DeathCount);
+		}
+	}
+	// Reading time + pickups/favorite.
+	{
+		const unsigned long long readMs = mod::inventory::ReadingElapsedMs();
+		const int total = mod::inventory::TotalPickups();
+		int favN = 0;
+		const std::string fav = mod::inventory::FavoritePickup(favN);
+		const bool showReading = overlay::rpShowReading && readMs >= 1000;
+		const bool showPickups = overlay::rpShowPickups && total > 0;
+		if (showReading || showPickups) {
+			ImGui::Separator();
+			if (showReading) {
+				ImGui::TextColored(ImVec4(0.72f, 0.80f, 0.62f, 1.0f), "Reading  %s", FormatMinSec(readMs).c_str());
+				if (showPickups) ImGui::SameLine();
+			}
+			if (showPickups) {
+				ImGui::TextColored(ImVec4(0.85f, 0.82f, 0.60f, 1.0f), "%sPickups  %d",
+					showReading ? "   " : "", total);
+				if (!fav.empty()) {
+					ImGui::TextColored(ImVec4(0.78f, 0.74f, 0.90f, 1.0f), "Favorite  %s x%d", fav.c_str(), favN);
+				}
+			}
+		}
+	}
+	// Run-origin stamp: warn when the report isn't a full playthrough.
+	if (!overlay::runFromStart) {
+		ImGui::Separator();
+		ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.45f, 1.0f), "Partial run - started at %s",
+			overlay::runOriginMap.empty() ? "mid-game" : overlay::runOriginMap.c_str());
+		ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.78f, 1.0f),
+			"Counters + session stats cover this run only, not the whole game.");
+	}
 	ImGui::Spacing();
 	ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.60f, 0.64f, 0.70f, 1.0f));
 	ImGui::TextWrapped("Filed to NCG_Survey_Report.txt in the game folder.");
@@ -1521,10 +2054,12 @@ static void RenderCalculator() {
 			sprintf_s(oc, sizeof(oc), "%llo", static_cast<unsigned long long>(a));
 			ImGui::Separator();
 			ImGui::TextColored(overlay::titleColor, "A in all bases");
-			ImGui::Text("DEC  %lld", a);
-			ImGui::Text("HEX  %s", hx);
-			ImGui::TextWrapped("BIN  %s", toBin(a).c_str());
-			ImGui::Text("OCT  %s", oc);
+			char decs[32]; sprintf_s(decs, sizeof(decs), "%lld", a);
+			ImGui::Text("DEC  %s", decs); ImGui::SameLine(); if (ImGui::SmallButton("copy##adec")) ImGui::SetClipboardText(decs);
+			ImGui::Text("HEX  %s", hx); ImGui::SameLine(); if (ImGui::SmallButton("copy##ahex")) ImGui::SetClipboardText(hx);
+			std::string bins = toBin(a);
+			ImGui::TextWrapped("BIN  %s", bins.c_str()); ImGui::SameLine(); if (ImGui::SmallButton("copy##abin")) ImGui::SetClipboardText(bins.c_str());
+			ImGui::Text("OCT  %s", oc); ImGui::SameLine(); if (ImGui::SmallButton("copy##aoct")) ImGui::SetClipboardText(oc);
 			ImGui::Separator();
 			ImGui::TextColored(overlay::titleColor, "Bitwise (A op B)");
 			ImGui::Text("A & B = %lld", a & b);
@@ -1535,6 +2070,42 @@ static void RenderCalculator() {
 			if (shift < 0) shift = 0; if (shift > 63) shift = 63;
 			ImGui::Text("A << %d = %lld", shift, a << shift);
 			ImGui::Text("A >> %d = %lld", shift, a >> shift);
+
+			// ---- Text <-> bytes (ASCII) ----
+			ImGui::Separator();
+			ImGui::TextColored(overlay::titleColor, "Text <-> bytes (ASCII)");
+
+			static char txtBuf[128] = "";
+			ImGui::SetNextItemWidth(280); ImGui::InputText("Text", txtBuf, sizeof(txtBuf));
+			std::string hexOut, decOut, binOut;
+			for (unsigned char* p = reinterpret_cast<unsigned char*>(txtBuf); *p; ++p) {
+				char t[8];
+				sprintf_s(t, sizeof(t), "%02X ", *p); hexOut += t;
+				sprintf_s(t, sizeof(t), "%u ", *p); decOut += t;
+				for (int i = 7; i >= 0; --i) binOut += ((*p >> i) & 1) ? '1' : '0';
+				binOut += ' ';
+			}
+			ImGui::TextWrapped("HEX  %s", hexOut.c_str()); ImGui::SameLine(); if (ImGui::SmallButton("copy##thex")) ImGui::SetClipboardText(hexOut.c_str());
+			ImGui::TextWrapped("DEC  %s", decOut.c_str()); ImGui::SameLine(); if (ImGui::SmallButton("copy##tdec")) ImGui::SetClipboardText(decOut.c_str());
+			ImGui::TextWrapped("BIN  %s", binOut.c_str()); ImGui::SameLine(); if (ImGui::SmallButton("copy##tbin")) ImGui::SetClipboardText(binOut.c_str());
+
+			static char bytesBuf[256] = "";
+			ImGui::SetNextItemWidth(280); ImGui::InputText("Bytes", bytesBuf, sizeof(bytesBuf));
+			if (ImGui::IsItemHovered()) ImGui::SetTooltip("Space/comma-separated byte values in the Input base above.\ne.g. HEX: 48 65 6C 6C 6F  ->  Hello");
+			std::string decoded;
+			{
+				const char* s = bytesBuf;
+				while (*s) {
+					while (*s == ' ' || *s == ',' || *s == '\t') ++s;
+					if (!*s) break;
+					char* end = nullptr;
+					long v = strtol(s, &end, base);
+					if (end == s) break;
+					if (v > 0 && v < 256) decoded += static_cast<char>(v);
+					s = end;
+				}
+			}
+			ImGui::TextWrapped("Text  %s", decoded.c_str()); ImGui::SameLine(); if (ImGui::SmallButton("copy##btext")) ImGui::SetClipboardText(decoded.c_str());
 		}
 		else if (overlay::calcMode == overlay::CalcMode::Style) {
 			// Live skin editor. Edits apply instantly; Save writes them (and
@@ -1670,6 +2241,47 @@ namespace {
 	int  g_CSLoadBudget = 0;               // texture decodes allowed this frame
 	std::vector<std::wstring> g_CSFiles;   // photos found on disk (DCIM + subfolders)
 	bool g_CSScanned = false;              // rescan when the sheet is (re)opened
+	std::map<std::wstring, unsigned long long> g_CSMtime; // path -> last write time
+	std::set<std::wstring> g_CSPinned;     // pinned photo paths (persisted)
+
+	static unsigned long long CSMtimeOf(const std::wstring& p) {
+		std::map<std::wstring, unsigned long long>::const_iterator it = g_CSMtime.find(p);
+		return (it != g_CSMtime.end()) ? it->second : 0ULL;
+	}
+	static bool CSIsPinned(const std::wstring& p) { return g_CSPinned.find(p) != g_CSPinned.end(); }
+
+	// Pins persist in DCIM\silta_pins.txt (one UTF-8 path per line).
+	static void CSLoadPins() {
+		g_CSPinned.clear();
+		std::ifstream f("DCIM\\silta_pins.txt", std::ios::binary);
+		if (!f.is_open()) return;
+		std::string line;
+		while (std::getline(f, line)) {
+			while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+			if (line.empty()) continue;
+			int wn = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, nullptr, 0);
+			if (wn <= 0) continue;
+			std::wstring w(wn - 1, L'\0');
+			MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, &w[0], wn);
+			g_CSPinned.insert(w);
+		}
+	}
+	static void CSSavePins() {
+		std::ofstream f("DCIM\\silta_pins.txt", std::ios::binary | std::ios::trunc);
+		if (!f.is_open()) return;
+		for (std::set<std::wstring>::const_iterator it = g_CSPinned.begin(); it != g_CSPinned.end(); ++it) {
+			int n = WideCharToMultiByte(CP_UTF8, 0, it->c_str(), -1, nullptr, 0, nullptr, nullptr);
+			if (n <= 0) continue;
+			std::string u(n - 1, '\0');
+			WideCharToMultiByte(CP_UTF8, 0, it->c_str(), -1, &u[0], n, nullptr, nullptr);
+			f << u << "\n";
+		}
+	}
+	static void CSTogglePin(const std::wstring& p) {
+		if (g_CSPinned.find(p) != g_CSPinned.end()) g_CSPinned.erase(p);
+		else g_CSPinned.insert(p);
+		CSSavePins();
+	}
 
 	// Collect DCIM\*.jpg/png plus one level of subfolders. Fast (directory metadata
 	// only, no decoding) - the expensive part is texture creation, which is budgeted.
@@ -1685,12 +2297,23 @@ namespace {
 			if (len > 4 && (_wcsicmp(fd.cFileName + len - 4, L".jpg") == 0 ||
 				_wcsicmp(fd.cFileName + len - 4, L".png") == 0)) {
 				g_CSFiles.push_back(full);
+				g_CSMtime[full] = (static_cast<unsigned long long>(fd.ftLastWriteTime.dwHighDateTime) << 32)
+					| fd.ftLastWriteTime.dwLowDateTime;
 			}
 		} while (FindNextFile(h, &fd));
 		FindClose(h);
 	}
 	void CSScan() {
+		// Release cached textures so a rescan reflects on-disk changes. Without
+		// this, a reused filename (e.g. DSC00001 after you delete the old photos
+		// and shoot again) keeps serving the OLD cached texture until a restart.
+		for (auto& kv : g_CSCache) {
+			if (kv.second.tex != nullptr) kv.second.tex->Release();
+		}
+		g_CSCache.clear();
 		g_CSFiles.clear();
+		g_CSMtime.clear();
+		CSLoadPins();
 		CSAddDir(L"DCIM");
 		WIN32_FIND_DATA fd;
 		HANDLE h = FindFirstFile(L"DCIM\\*", &fd);
@@ -1702,7 +2325,14 @@ namespace {
 			} while (FindNextFile(h, &fd));
 			FindClose(h);
 		}
-		std::sort(g_CSFiles.begin(), g_CSFiles.end());
+		std::sort(g_CSFiles.begin(), g_CSFiles.end(),
+			[](const std::wstring& a, const std::wstring& b) {
+				const bool pa = CSIsPinned(a), pb = CSIsPinned(b);
+				if (pa != pb) return pa;                      // pinned first
+				if (overlay::csSort == 1) return CSMtimeOf(a) > CSMtimeOf(b); // newest first
+				if (overlay::csSort == 2) return CSMtimeOf(a) < CSMtimeOf(b); // oldest first
+				return a < b;                                 // by name
+			});
 		g_CSScanned = true;
 		LogV("contact: scanned DCIM, " + std::to_string(g_CSFiles.size()) + " photos");
 	}
@@ -1824,28 +2454,58 @@ static void RenderContactSheet(LPDIRECT3DDEVICE9 dev) {
 				LogV("contact: back to grid");
 			} else if (g_CSSelected >= 0 && g_CSSelected < static_cast<int>(photos.size())) {
 				// filename label
-				const std::wstring& wp = photos[g_CSSelected];
+				std::wstring wp = photos[g_CSSelected]; // copy: survives a rescan below
 				size_t slash = wp.find_last_of(L"\\/");
 				std::wstring wname = (slash == std::wstring::npos) ? wp : wp.substr(slash + 1);
 				char name[128] = { 0 };
 				WideCharToMultiByte(CP_UTF8, 0, wname.c_str(), -1, name, sizeof(name) - 1, nullptr, nullptr);
 				ImGui::SameLine();
 				ImGui::TextColored(overlay::titleColor, "  %s", name);
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Delete")) ImGui::OpenPopup("##delphoto");
+				ImGui::SameLine();
+				const bool pinned = CSIsPinned(wp);
+				if (ImGui::SmallButton(pinned ? "Unpin" : "Pin")) {
+					CSTogglePin(wp);
+					CSScan(); // re-sort so pinned jumps to the front
+				}
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pin keeps this photo at the front of the sheet.");
+				if (ImGui::BeginPopup("##delphoto")) {
+					ImGui::TextColored(overlay::titleColor, "Delete %s permanently?", name);
+					if (ImGui::Button("Yes, delete")) {
+						// Drop the cached texture, remove the file, return to the grid.
+						auto it = g_CSCache.find(wp);
+						if (it != g_CSCache.end()) {
+							if (it->second.tex != nullptr) it->second.tex->Release();
+							g_CSCache.erase(it);
+						}
+						DeleteFileW(wp.c_str());
+						LogV("contact: deleted photo");
+						g_CSSelected = -1;
+						CSScan();
+						ImGui::CloseCurrentPopup();
+					}
+					ImGui::SameLine();
+					if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+					ImGui::EndPopup();
+				}
 				ImGui::Separator();
 
-				int w = 0, h = 0;
-				bool pending = false;
-				IDirect3DTexture9* tex = CSLoad(dev, wp, w, h, pending);
-				ImGui::BeginChild("##isolate", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
-				if (tex) {
-					ImGui::Image(reinterpret_cast<ImTextureID>(tex),
-						ImVec2(static_cast<float>(w) * g_CSZoom, static_cast<float>(h) * g_CSZoom));
-				} else if (pending) {
-					ImGui::TextColored(overlay::titleColor, "Loading...");
-				} else {
-					ImGui::TextColored(overlay::titleColor, "Could not load this image.");
+				if (g_CSSelected >= 0) {
+					int w = 0, h = 0;
+					bool pending = false;
+					IDirect3DTexture9* tex = CSLoad(dev, wp, w, h, pending);
+					ImGui::BeginChild("##isolate", ImVec2(0, 0), true, ImGuiWindowFlags_HorizontalScrollbar);
+					if (tex) {
+						ImGui::Image(reinterpret_cast<ImTextureID>(tex),
+							ImVec2(static_cast<float>(w) * g_CSZoom, static_cast<float>(h) * g_CSZoom));
+					} else if (pending) {
+						ImGui::TextColored(overlay::titleColor, "Loading...");
+					} else {
+						ImGui::TextColored(overlay::titleColor, "Could not load this image.");
+					}
+					ImGui::EndChild();
 				}
-				ImGui::EndChild();
 			}
 		}
 	}
@@ -2001,12 +2661,14 @@ namespace {
 		}
 
 		// NCG letterhead - fully-opaque ink so it reads on paper and over the
-		// game scene alike.
-		StampText(s * 6, s * 6, s, "NATIONAL CONSULTING GROUP", hr, hg, hb);
-		StampText(s * 6, s * 6 + 9 * s, (s > 2 ? s - 1 : 1), "N.C.G.  STRUCTURAL SURVEY SHEET", hr, hg, hb);
-		for (int x = s * 6; x < W - s * 6; ++x) {
-			PutPixel(x, s * 6 + 18 * s, hr, hg, hb);
-			PutPixel(x, s * 6 + 18 * s + 1, hr, hg, hb);
+		// game scene alike. Skipped in plain-whiteboard mode (sketchSurvey off).
+		if (overlay::sketchSurvey) {
+			StampText(s * 6, s * 6, s, "NATIONAL CONSULTING GROUP", hr, hg, hb);
+			StampText(s * 6, s * 6 + 9 * s, (s > 2 ? s - 1 : 1), "N.C.G.  STRUCTURAL SURVEY SHEET", hr, hg, hb);
+			for (int x = s * 6; x < W - s * 6; ++x) {
+				PutPixel(x, s * 6 + 18 * s, hr, hg, hb);
+				PutPixel(x, s * 6 + 18 * s + 1, hr, hg, hb);
+			}
 		}
 
 		// Optional title block, bottom-left.
@@ -2024,6 +2686,26 @@ namespace {
 		g_SketchBufDirty = true;
 		g_SketchUnsaved = false;
 		g_SketchHasInk = false;
+	}
+
+	// Stroke-level undo: snapshot the whole canvas before each stroke (and before
+	// Clear), bounded ring. A 1000x1000 sheet is ~4MB/snapshot, so cap the depth.
+	std::vector<std::vector<unsigned char>> g_SketchUndo;
+	const size_t kSketchMaxUndo = 8;
+
+	void SketchPushUndo() {
+		if (g_SketchPixels.empty()) return;
+		g_SketchUndo.push_back(g_SketchPixels);
+		if (g_SketchUndo.size() > kSketchMaxUndo) g_SketchUndo.erase(g_SketchUndo.begin());
+	}
+
+	void SketchUndo() {
+		if (g_SketchUndo.empty()) return;
+		g_SketchPixels = g_SketchUndo.back();
+		g_SketchUndo.pop_back();
+		g_SketchBufDirty = true;
+		g_SketchUnsaved = true;
+		LogV("sketch: undo");
 	}
 
 	void SketchInit() {
@@ -2224,11 +2906,29 @@ static void RenderSketch(LPDIRECT3DDEVICE9 dev) {
 		ImGui::SameLine();
 		ImGui::Checkbox("Smooth", &overlay::sketchSmooth);
 		ImGui::SameLine();
-		if (ImGui::Button("Clear")) { SketchClear(); }
+		// Plain whiteboard: invert of the survey-sheet decorations (letterhead,
+		// grid, title block). Switching sheet type re-clears the canvas.
+		bool plain = !overlay::sketchSurvey;
+		if (ImGui::Checkbox("Plain", &plain)) {
+			overlay::sketchSurvey = !plain;
+			SketchClear();
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Blank whiteboard (no NCG letterhead/grid).\nSwitching clears the sheet.");
+		ImGui::SameLine();
+		if (ImGui::Button("Undo")) { SketchUndo(); }
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Undo the last stroke (Ctrl-Z)");
+		ImGui::SameLine();
+		if (ImGui::Button("Clear")) { SketchPushUndo(); SketchClear(); }
 		ImGui::SameLine();
 		if (ImGui::Button("Save PNG")) { SketchSave(dev); }
 		ImGui::SameLine();
 		ImGui::TextColored(overlay::titleColor, g_SketchUnsaved ? "  (unsaved)" : "  (saved)");
+
+		// Ctrl-Z stroke undo while the sketch window (or its canvas child) is focused.
+		if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) &&
+			ImGui::GetIO().KeyCtrl && ImGui::IsKeyPressed('Z')) {
+			SketchUndo();
+		}
 
 		// Canvas: fit the W:H page into the available area, preserving aspect (so the
 		// shape never distorts - resizing the window only scales/letterboxes it). An
@@ -2257,6 +2957,9 @@ static void RenderSketch(LPDIRECT3DDEVICE9 dev) {
 				dl->AddCallback(ImDrawCallback_ResetRenderState, nullptr);
 			}
 
+			if (ImGui::IsItemActivated()) {
+				SketchPushUndo(); // snapshot before this stroke begins
+			}
 			if (ImGui::IsItemActive() && dispW > 0.0f && dispH > 0.0f) {
 				const ImVec2 m = ImGui::GetIO().MousePos;
 				const int px = static_cast<int>((m.x - canvasPos.x) / dispW * W);
@@ -2302,6 +3005,13 @@ void overlay::DispatchHotkey(int vk) {
 	else if (hk.reloadConfig && vk == hk.reloadConfig) {
 		overlay::reloadRequested = true;
 	}
+	else if (hk.clearLog && vk == hk.clearLog) {
+		ClearSiltaLog();
+		overlay::ShowToast("silta.log cleared", 2.0f);
+	}
+	else if (hk.dumpHeld && vk == hk.dumpHeld) {
+		mod::inventory::DumpHeldObject();
+	}
 	else if (hk.toggleCounters && vk == hk.toggleCounters) {
 		overlay::countersEnabled = !overlay::countersEnabled;
 	}
@@ -2318,6 +3028,7 @@ void overlay::DispatchHotkey(int vk) {
 	}
 	else if (hk.toggleLock && vk == hk.toggleLock) {
 		overlay::locked = !overlay::locked;
+		ShowToast(overlay::locked ? "Edit mode OFF (overlays locked)" : "Edit mode ON (drag overlays)", 2.0f);
 	}
 	else if (hk.resetPosition && vk == hk.resetPosition) {
 		overlay::forceReposition = true;
@@ -2433,6 +3144,437 @@ static void PresentImGui(LPDIRECT3DDEVICE9 dev) {
 	if (prevRT != nullptr) prevRT->Release();
 }
 
+// ----- Binocular zoom overlay -----
+// A two-circle "binocular" mask drawn over the game while a zoom key (default
+// middle mouse, matching INFRA/Portal 2) is held. The mask is a procedurally
+// generated alpha texture (opaque outside the circles, transparent inside, soft
+// edge), drawn fullscreen on ImGui's background draw list (under SILTA's HUD).
+// Activation plays the phone deploy "jacket" sound and can optionally force FOV.
+namespace {
+	IDirect3DTexture9* g_BinoTex = nullptr;
+	int   g_BinoW = 0, g_BinoH = 0;
+	float g_BinoSig = -1.0f;     // params signature, to rebuild on change
+	bool  g_BinoActive = false;
+	bool  g_BinoPrevKey = false;
+	bool  g_BinoWanted = false; // user's toggle intent (separate from visibility)
+	float g_BinoFade = 0.0f;     // 0..1 current opacity multiplier
+	double g_BinoLastTime = 0.0;
+
+	float BinoSignature(int W, int H) {
+		return static_cast<float>(W) * 1e6f + static_cast<float>(H) * 13.0f
+			+ overlay::binoRadius * 1000.0f + overlay::binoSeparation * 777.0f
+			+ static_cast<float>(overlay::binoSoftness) * 7.0f
+			+ static_cast<float>(overlay::binoOpacity) * 0.11f
+			+ overlay::binoColor[0] * 3.0f + overlay::binoColor[1] * 5.0f + overlay::binoColor[2] * 9.0f;
+	}
+
+	void BuildBinoMask(LPDIRECT3DDEVICE9 dev, int W, int H) {
+		overlay::ReleaseBinocular();
+		if (dev->CreateTexture(W, H, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &g_BinoTex, nullptr) != D3D_OK) {
+			g_BinoTex = nullptr; return;
+		}
+		D3DLOCKED_RECT lr;
+		if (g_BinoTex->LockRect(0, &lr, nullptr, 0) != D3D_OK) { overlay::ReleaseBinocular(); return; }
+
+		const float cy = H * 0.5f;
+		const float r = overlay::binoRadius * H;
+		const float sep = overlay::binoSeparation * W;
+		const float cxL = W * 0.5f - sep;
+		const float cxR = W * 0.5f + sep;
+		const float soft = (overlay::binoSoftness > 0) ? static_cast<float>(overlay::binoSoftness) : 1.0f;
+		const int maxA = (overlay::binoOpacity < 0) ? 0 : (overlay::binoOpacity > 255 ? 255 : overlay::binoOpacity);
+		const unsigned int R = static_cast<unsigned int>(overlay::binoColor[0] * 255.0f) & 0xFF;
+		const unsigned int G = static_cast<unsigned int>(overlay::binoColor[1] * 255.0f) & 0xFF;
+		const unsigned int B = static_cast<unsigned int>(overlay::binoColor[2] * 255.0f) & 0xFF;
+		unsigned char* base = static_cast<unsigned char*>(lr.pBits);
+
+		for (int y = 0; y < H; ++y) {
+			unsigned int* row = reinterpret_cast<unsigned int*>(base + y * lr.Pitch);
+			const float dy = static_cast<float>(y) - cy;
+			for (int x = 0; x < W; ++x) {
+				const float dxl = static_cast<float>(x) - cxL;
+				const float dxr = static_cast<float>(x) - cxR;
+				const float dl = sqrtf(dxl * dxl + dy * dy);
+				const float dr = sqrtf(dxr * dxr + dy * dy);
+				const float d = (dl < dr) ? dl : dr;   // distance to the nearer eye
+				float cov; // 0 inside a circle (see-through) .. 1 outside (masked)
+				if (d <= r) cov = 0.0f;
+				else if (d >= r + soft) cov = 1.0f;
+				else cov = (d - r) / soft;
+				const unsigned int A = static_cast<unsigned int>(cov * maxA) & 0xFF;
+				row[x] = (A << 24) | (R << 16) | (G << 8) | B; // A8R8G8B8
+			}
+		}
+		g_BinoTex->UnlockRect(0);
+		g_BinoW = W; g_BinoH = H; g_BinoSig = BinoSignature(W, H);
+	}
+}
+
+void overlay::ReleaseBinocular() {
+	if (g_BinoTex != nullptr) { g_BinoTex->Release(); g_BinoTex = nullptr; }
+	g_BinoW = g_BinoH = 0; g_BinoSig = -1.0f;
+}
+
+void overlay::BinocularTick(LPDIRECT3DDEVICE9 /*pDevice*/) {
+	if (!overlay::binoEnabled) { g_BinoActive = false; return; }
+
+	// Suppress while a menu is up, or another tool is out (phone / flashlight /
+	// optional camera flag) - so bringing out another item hides the scope
+	// instead of leaving it stuck. Phone also covers the ESC state-flip.
+	bool suppressed = overlay::inMenu;
+	if (!suppressed && overlay::binoHidePhone) {
+		// A live phone CALL (currentPhoneCall @0x1844)...
+		if (Engine()->IsPhoneOut()) suppressed = true;
+		// ...or the phone WEAPON simply being equipped (active weapon resolves to
+		// infra_phone). The call flag misses the equipped-but-not-calling case,
+		// which is what "completing weapon switch to infra_phone" reports.
+		else if (overlay::binoPhoneWeaponOffset != 0) {
+			const std::string wc = Engine()->ClassAtOffset(overlay::binoPhoneWeaponOffset);
+			if (!wc.empty() && !overlay::binoPhoneClass.empty() &&
+				wc.find(overlay::binoPhoneClass) != std::string::npos) suppressed = true;
+		}
+	}
+	if (!suppressed && overlay::binoHideFlash) {
+		bool fUp = false, fOn = false;
+		if (Engine()->GetFlashlightState(fUp, fOn) && fOn) suppressed = true;
+	}
+	if (!suppressed && overlay::binoCamOffset != 0) {
+		void* pl = Engine()->CGlobalEntityList__FindEntityByName(nullptr, "!player");
+		int camOut = 0;
+		if (pl != nullptr && ReadPlayerHealth(pl, overlay::binoCamOffset, camOut) && camOut != 0) suppressed = true;
+	}
+
+	const bool keyDown = (GetAsyncKeyState(overlay::binoKey) & 0x8000) != 0;
+
+	// FOV gate: read the live m_iFOV and let the game's real zoom state drive the
+	// scope. Narrow FOV = zoomed = scope on; wide = off. Tracks reality and is
+	// immune to the toggle/ESC desync. Falls back to the key toggle if the FOV
+	// can't be read or the gate is off.
+	bool fovDecided = false, fovNarrow = false;
+	if (overlay::binoFovGate && overlay::binoFovOffset != 0) {
+		void* pl = Engine()->CGlobalEntityList__FindEntityByName(nullptr, "!player");
+		int fov = 0;
+		static int  lastLoggedFov = -999999;
+		static bool loggedFail = false;
+		if (pl != nullptr && ReadPlayerHealth(pl, overlay::binoFovOffset, fov)) { // generic int read
+			loggedFail = false;
+			// Log every DISTINCT value once, via LogRaw so it appears even with
+			// verbose off. Quiet when the FOV is stable; one line per zoom step.
+			if (fov != lastLoggedFov) {
+				char fb[88];
+				sprintf_s(fb, sizeof(fb), "binocular: m_iFOV=%d @0x%X (zoomed<=%d? %s)",
+					fov, overlay::binoFovOffset, overlay::binoFovZoomMax,
+					(fov > 0 && fov <= overlay::binoFovZoomMax) ? "yes" : "no");
+				LogRaw(fb);
+				lastLoggedFov = fov;
+			}
+			// Only authoritative when the FOV is a real override (non-zero). If it
+			// stays 0 (the game isn't routing its zoom through m_iFOV on this
+			// build), we fall through to the key toggle - no regression.
+			if (fov > 0) {
+				fovDecided = true;
+				fovNarrow = (fov <= overlay::binoFovZoomMax);
+			}
+		} else if (!loggedFail) {
+			LogRaw("binocular: m_iFOV read FAILED (player null or bad fov_offset)");
+			loggedFail = true;
+		}
+	}
+
+	const bool wasActive = g_BinoActive;
+	if (suppressed) {
+		g_BinoWanted = false;
+		g_BinoActive = false;
+		g_BinoPrevKey = keyDown;
+	} else if (fovDecided) {
+		// Real zoom state is authoritative when the FOV can be read.
+		g_BinoActive = fovNarrow;
+		g_BinoWanted = fovNarrow;
+		g_BinoPrevKey = keyDown;
+	} else if (overlay::binoToggle) {
+		if (keyDown && !g_BinoPrevKey) g_BinoWanted = !g_BinoWanted; // flip on press edge
+		g_BinoActive = g_BinoWanted;
+		g_BinoPrevKey = keyDown;
+	} else {
+		g_BinoWanted = keyDown; // hold-to-zoom
+		g_BinoActive = keyDown;
+		g_BinoPrevKey = keyDown;
+	}
+
+	if (g_BinoActive && !wasActive) {
+		if (overlay::binoSound && !overlay::binoSoundDeploy.empty())
+			overlay::QueueEngineCommand("playgamesound " + overlay::binoSoundDeploy);
+		LogV("binocular: zoom in");
+	} else if (!g_BinoActive && wasActive) {
+		if (overlay::binoSound && !overlay::binoSoundHolster.empty())
+			overlay::QueueEngineCommand("playgamesound " + overlay::binoSoundHolster);
+		LogV("binocular: zoom out");
+	}
+}
+
+void overlay::RenderBinocular(LPDIRECT3DDEVICE9 pDevice) {
+	if (!overlay::binoEnabled) return;
+
+	// Ease the fade toward the target (1 when active, 0 when not).
+	const double now = ImGui::GetTime();
+	if (g_BinoLastTime == 0.0) g_BinoLastTime = now;
+	const float dur = (overlay::binoFadeMs > 0) ? (overlay::binoFadeMs / 1000.0f) : 0.001f;
+	const float step = static_cast<float>(now - g_BinoLastTime) / dur;
+	g_BinoLastTime = now;
+	const float target = g_BinoActive ? 1.0f : 0.0f;
+	if (g_BinoFade < target)      g_BinoFade = (g_BinoFade + step > target) ? target : g_BinoFade + step;
+	else if (g_BinoFade > target) g_BinoFade = (g_BinoFade - step < target) ? target : g_BinoFade - step;
+	if (g_BinoFade <= 0.001f) return; // fully hidden - nothing to draw
+
+	const ImVec2 sz = ImGui::GetIO().DisplaySize;
+	const int W = static_cast<int>(sz.x), H = static_cast<int>(sz.y);
+	if (W <= 0 || H <= 0) return;
+	if (g_BinoTex == nullptr || g_BinoW != W || g_BinoH != H || g_BinoSig != BinoSignature(W, H)) {
+		BuildBinoMask(pDevice, W, H);
+	}
+	if (g_BinoTex == nullptr) return;
+
+	const int a = static_cast<int>(g_BinoFade * 255.0f);
+	ImGui::GetBackgroundDrawList()->AddImage(reinterpret_cast<ImTextureID>(g_BinoTex),
+		ImVec2(0, 0), sz, ImVec2(0, 0), ImVec2(1, 1), IM_COL32(255, 255, 255, a));
+}
+
+// ----- Max Payne-style silhouette health bar -----
+// A person-bust silhouette whose lower portion fills with a health colour
+// (green -> yellow -> red) proportional to the player's current health, read at
+// the same offset the death counter uses (srHealthOffset, default 0x210). Debug
+// feature, off by default - a visual sanity check that the offset is correct.
+namespace {
+	bool ReadCurrentHealth(int& hp) {
+		if (overlay::srHealthOffset == 0) return false;
+		void* player = Engine()->CGlobalEntityList__FindEntityByName(nullptr, "!player");
+		if (player == nullptr) return false;
+		return ReadPlayerHealth(player, overlay::srHealthOffset, hp);
+	}
+
+	void DrawSilhouette(ImDrawList* dl, ImVec2 p, float w, float h, ImU32 col) {
+		const float cx = p.x + w * 0.5f;
+		const float headR = w * 0.17f;
+		const float headCy = p.y + headR + h * 0.02f;
+		const float shY = p.y + h * 0.36f;   // shoulder line
+		const float botY = p.y + h;
+		dl->AddRectFilled(ImVec2(cx - w * 0.10f, headCy), ImVec2(cx + w * 0.10f, shY + 2.0f), col);       // neck
+		dl->AddQuadFilled(ImVec2(p.x + w * 0.05f, shY), ImVec2(p.x + w * 0.95f, shY),
+			ImVec2(p.x + w * 0.80f, botY), ImVec2(p.x + w * 0.20f, botY), col);                           // torso
+		dl->AddCircleFilled(ImVec2(cx, headCy), headR, col, 28);                                          // head
+	}
+}
+
+// ----- Health-bar SVG silhouette (NanoSVG -> D3D9 texture) -----
+// Loads Mark's silhouette from a loose "health.svg" (next to the game exe, so
+// the art can be iterated without a rebuild), falling back to the embedded
+// RCDATA copy, then rasterizes it once into a MANAGED A8R8G8B8 texture used as
+// an alpha mask for the fill. If neither source loads, the caller falls back to
+// the procedural silhouette. All failures are non-fatal.
+namespace {
+	IDirect3DTexture9* g_HealthTex = nullptr;
+	int  g_HealthTexW = 0, g_HealthTexH = 0;
+	bool g_HealthTried = false;           // don't retry a failed load every frame
+	const int kHealthRasterH = 256;       // rasterize height (px); width follows aspect
+
+	HMODULE HealthSelfModule() {
+		HMODULE h = nullptr;
+		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+			reinterpret_cast<LPCSTR>(&HealthSelfModule), &h);
+		return h;
+	}
+
+	// SVG source: loose file first (iteration), then the embedded resource.
+	// Returns a mutable, null-terminated buffer (NanoSVG mutates it in place).
+	std::vector<char> LoadHealthSvgSource() {
+		// Any *.svg next to the game exe (cwd) overrides the embedded silhouette -
+		// the name doesn't matter, first one found wins. Drop in a replacement
+		// without renaming it.
+		WIN32_FIND_DATAA fd;
+		HANDLE hFind = FindFirstFileA("*.svg", &fd);
+		if (hFind != INVALID_HANDLE_VALUE) {
+			std::string name;
+			do {
+				if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { name = fd.cFileName; break; }
+			} while (FindNextFileA(hFind, &fd));
+			FindClose(hFind);
+			if (!name.empty()) {
+				std::ifstream f(name, std::ios::binary);
+				if (f.is_open()) {
+					std::vector<char> buf((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+					if (!buf.empty()) {
+						LogI(std::string("health: loaded silhouette from ") + name);
+						buf.push_back('\0');
+						return buf;
+					}
+				}
+			}
+		}
+		HMODULE self = HealthSelfModule();
+		HRSRC res = self ? FindResource(self, MAKEINTRESOURCE(IDR_HEALTH_SVG), RT_RCDATA) : nullptr;
+		if (res != nullptr) {
+			HGLOBAL hg = LoadResource(self, res);
+			DWORD sz = SizeofResource(self, res);
+			const char* data = hg ? static_cast<const char*>(LockResource(hg)) : nullptr;
+			if (data != nullptr && sz > 0) {
+				std::vector<char> buf(data, data + sz);
+				buf.push_back('\0');
+				return buf;
+			}
+		}
+		return std::vector<char>();
+	}
+
+	// Lazily build the silhouette texture. Returns true if g_HealthTex is ready.
+	bool EnsureHealthTexture(LPDIRECT3DDEVICE9 dev) {
+		if (g_HealthTex != nullptr) return true;
+		if (g_HealthTried || dev == nullptr) return false;
+		g_HealthTried = true; // one shot; ReleaseHealthTexture() re-arms on demand
+
+		std::vector<char> src = LoadHealthSvgSource();
+		if (src.empty()) { LogI("health: no health.svg (loose or embedded) - procedural silhouette"); return false; }
+
+		NSVGimage* img = nsvgParse(src.data(), "px", 96.0f);
+		if (img == nullptr || img->width <= 0.0f || img->height <= 0.0f) {
+			if (img) nsvgDelete(img);
+			LogE("health: SVG parse failed - procedural silhouette");
+			return false;
+		}
+		const int H = kHealthRasterH;
+		const float scale = static_cast<float>(H) / img->height;
+		int W = static_cast<int>(img->width * scale + 0.5f);
+		if (W < 1) W = 1;
+
+		NSVGrasterizer* rast = nsvgCreateRasterizer();
+		std::vector<unsigned char> rgba(static_cast<size_t>(W) * H * 4, 0);
+		if (rast != nullptr)
+			nsvgRasterize(rast, img, 0.0f, 0.0f, scale, rgba.data(), W, H, W * 4);
+		if (rast) nsvgDeleteRasterizer(rast);
+		nsvgDelete(img);
+
+		IDirect3DTexture9* tex = nullptr;
+		if (dev->CreateTexture(W, H, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &tex, nullptr) != D3D_OK || tex == nullptr) {
+			LogE("health: CreateTexture failed - procedural silhouette");
+			return false;
+		}
+		D3DLOCKED_RECT lr;
+		if (tex->LockRect(0, &lr, nullptr, 0) != D3D_OK) { tex->Release(); return false; }
+		// Store as a WHITE alpha-mask: RGB forced to white, alpha = the rasterized
+		// coverage. ImGui's AddImage multiplies texture.rgb by the tint colour, so
+		// white*tint = tint - which is what makes fill_full/fill_low/empty_color
+		// actually appear. (The SVG's own fill is black, so copying its RGB gave a
+		// texture that stayed black under any tint.)
+		unsigned char* dst = static_cast<unsigned char*>(lr.pBits);
+		for (int y = 0; y < H; ++y) {
+			const unsigned char* srow = &rgba[static_cast<size_t>(y) * W * 4];
+			unsigned char* drow = dst + static_cast<size_t>(y) * lr.Pitch;
+			for (int x = 0; x < W; ++x) {
+				drow[x * 4 + 0] = 255;             // B
+				drow[x * 4 + 1] = 255;             // G
+				drow[x * 4 + 2] = 255;             // R
+				drow[x * 4 + 3] = srow[x * 4 + 3]; // A = coverage (the shape)
+			}
+		}
+		tex->UnlockRect(0);
+		g_HealthTex = tex; g_HealthTexW = W; g_HealthTexH = H;
+		char lb[80]; sprintf_s(lb, sizeof(lb), "health: silhouette texture %dx%d ready", W, H);
+		LogI(lb);
+		return true;
+	}
+}
+
+void overlay::ReleaseHealthTexture() {
+	if (g_HealthTex != nullptr) { g_HealthTex->Release(); g_HealthTex = nullptr; }
+	g_HealthTexW = g_HealthTexH = 0;
+	g_HealthTried = false; // allow a rebuild (e.g. after a reload swaps health.svg)
+}
+
+static void RenderHealthBar(LPDIRECT3DDEVICE9 dev) {
+	if (!overlay::showHealthBar) return;
+	int hp = 0;
+	if (!ReadCurrentHealth(hp)) return;
+
+	const int hmax = (overlay::healthMax > 0) ? overlay::healthMax : 100;
+	float frac = static_cast<float>(hp) / static_cast<float>(hmax);
+	if (frac < 0.0f) frac = 0.0f; if (frac > 1.0f) frac = 1.0f;
+
+	IDirect3DTexture9* tex = EnsureHealthTexture(dev) ? g_HealthTex : nullptr;
+
+	// Preserve the SVG aspect at a configurable height; procedural stays 64x84.
+	float w, h;
+	if (tex != nullptr && g_HealthTexH > 0) {
+		h = static_cast<float>(overlay::healthBarPx > 0 ? overlay::healthBarPx : 110);
+		w = h * (static_cast<float>(g_HealthTexW) / static_cast<float>(g_HealthTexH));
+	} else {
+		w = 64.0f; h = 84.0f;
+	}
+
+	ImGui::SetNextWindowBgAlpha(overlay::healthNoBg ? 0.0f : 0.30f);
+	ImGui::SetNextWindowPos(ImVec2(14.0f, 120.0f), ImGuiCond_FirstUseEver);
+	if (ImGui::Begin("##healthbar", nullptr,
+		ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize |
+		ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+		(overlay::locked ? ImGuiWindowFlags_NoMove : 0))) {
+
+		const ImVec2 p = ImGui::GetCursorScreenPos();
+		ImDrawList* dl = ImGui::GetWindowDrawList();
+		const ImU32 emptyCol = IM_COL32(
+			static_cast<int>(overlay::healthEmpty[0] * 255.0f + 0.5f),
+			static_cast<int>(overlay::healthEmpty[1] * 255.0f + 0.5f),
+			static_cast<int>(overlay::healthEmpty[2] * 255.0f + 0.5f), 220);
+
+		// fill colour: lerp low(0%) -> full(100%) by frac (both configurable;
+		// full defaults to INFRA's bioluminescent-mushroom green).
+		const int r = static_cast<int>((overlay::healthFillLow[0] + (overlay::healthFillFull[0] - overlay::healthFillLow[0]) * frac) * 255.0f + 0.5f);
+		const int g = static_cast<int>((overlay::healthFillLow[1] + (overlay::healthFillFull[1] - overlay::healthFillLow[1]) * frac) * 255.0f + 0.5f);
+		const int b = static_cast<int>((overlay::healthFillLow[2] + (overlay::healthFillFull[2] - overlay::healthFillLow[2]) * frac) * 255.0f + 0.5f);
+		const ImU32 fill = IM_COL32(r, g, b, 235);
+		const float clipY = p.y + h * (1.0f - frac);
+
+		if (tex != nullptr) {
+			const ImTextureID tid = reinterpret_cast<ImTextureID>(tex);
+			// empty silhouette (mask = texture alpha)
+			dl->AddImage(tid, p, ImVec2(p.x + w, p.y + h), ImVec2(0, 0), ImVec2(1, 1), emptyCol);
+			if (frac > 0.001f) {
+				if (overlay::healthFillGradient) {
+					// vertical gradient inside the fill: brighter toward the bottom.
+					const int bands = 14;
+					for (int i = 0; i < bands; ++i) {
+						const float t0 = static_cast<float>(i) / bands;
+						const float t1 = static_cast<float>(i + 1) / bands;
+						const float y0 = clipY + (p.y + h - clipY) * t0;
+						const float y1 = clipY + (p.y + h - clipY) * t1;
+						const float bt = t1; // brighten toward bottom
+						int br = r + static_cast<int>((255 - r) * 0.10f * bt);
+						int bg = g + static_cast<int>((255 - g) * 0.18f * bt);
+						int bb = b + static_cast<int>((255 - b) * 0.10f * bt);
+						if (br > 255) br = 255; if (bg > 255) bg = 255; if (bb > 255) bb = 255;
+						const ImU32 bc = IM_COL32(br, bg, bb, 235);
+						dl->PushClipRect(ImVec2(p.x, y0), ImVec2(p.x + w, y1), true);
+						dl->AddImage(tid, p, ImVec2(p.x + w, p.y + h), ImVec2(0, 0), ImVec2(1, 1), bc);
+						dl->PopClipRect();
+					}
+				} else {
+					dl->PushClipRect(ImVec2(p.x, clipY), ImVec2(p.x + w, p.y + h), true);
+					dl->AddImage(tid, p, ImVec2(p.x + w, p.y + h), ImVec2(0, 0), ImVec2(1, 1), fill);
+					dl->PopClipRect();
+				}
+			}
+		} else {
+			// procedural fallback (unchanged behaviour)
+			DrawSilhouette(dl, p, w, h, emptyCol);
+			dl->PushClipRect(ImVec2(p.x, clipY), ImVec2(p.x + w, p.y + h), true);
+			DrawSilhouette(dl, p, w, h, fill);
+			dl->PopClipRect();
+		}
+
+		ImGui::Dummy(ImVec2(w, h));
+		if (overlay::healthShowHp)
+			ImGui::TextColored(ImVec4(0.86f, 0.90f, 0.97f, 1.0f), "HP %d", hp);
+	}
+	ImGui::End();
+}
+
 void overlay::Render(const HWND hWnd, const LPDIRECT3DDEVICE9 pDevice) {
 	if (!overlay::imGuiInitialized) {
 		ImGui::CreateContext();
@@ -2447,15 +3589,17 @@ void overlay::Render(const HWND hWnd, const LPDIRECT3DDEVICE9 pDevice) {
 			// coordinates rounded to clean values). Any drag overwrites it.
 			static const char* kDefaultLayout =
 				"[Window][Debug##Default]\nPos=60,60\nSize=400,400\nCollapsed=0\n\n"
-				"[Window][Counters]\nPos=1731,940\nSize=161,117\nCollapsed=0\n\n"
-				"[Window][Inventory]\nPos=1774,881\nSize=116,42\nCollapsed=0\n\n"
-				"[Window][##progress]\nPos=440,10\nSize=396,102\nCollapsed=0\n\n"
+				"[Window][Counters]\nPos=1730,920\nSize=143,114\nCollapsed=0\n\n"
+				"[Window][Inventory]\nPos=1730,857\nSize=121,54\nCollapsed=0\n\n"
+				"[Window][##progress]\nPos=440,10\nSize=384,72\nCollapsed=0\n\n"
 				"[Window][Hotkeys]\nPos=840,10\nSize=235,222\nCollapsed=0\n\n"
 				"[Window][N.C.G. Field Calculator]\nPos=1600,380\nSize=300,430\nCollapsed=0\n\n"
 				"[Window][N.C.G. Study Outlook]\nPos=1080,10\nSize=330,250\nCollapsed=0\n\n"
 				"[Window][Notes]\nPos=80,730\nSize=380,280\nCollapsed=0\n\n"
 				"[Window][NCG Sketchbook]\nPos=470,250\nSize=700,760\nCollapsed=0\n\n"
-				"[Window][N.C.G. Contact Sheet]\nPos=90,240\nSize=990,658\nCollapsed=0\n";
+				"[Window][N.C.G. Contact Sheet]\nPos=90,240\nSize=990,658\nCollapsed=0\n\n"
+				"[Window][##speedrun]\nPos=1730,795\nSize=159,54\nCollapsed=0\n\n"
+				"[Window][##healthbar]\nPos=1647,795\nSize=68,147\nCollapsed=0\n";
 			std::ofstream lf(layoutPath, std::ios::binary | std::ios::trunc);
 			if (lf.is_open()) lf << kDefaultLayout;
 		}
@@ -2481,6 +3625,42 @@ void overlay::Render(const HWND hWnd, const LPDIRECT3DDEVICE9 pDevice) {
 	}
 
 
+	// Edit-mode auto close: if the overlays are unlocked (edit mode) and nothing
+	// has been dragged for editAutoCloseSecs, re-lock automatically so the player
+	// can't get stuck in placement mode. Any active mouse-drag on an ImGui window
+	// counts as activity.
+	if (!overlay::locked && overlay::editAutoCloseSecs > 0) {
+		static double lastActivity = 0.0;
+		const double now = ImGui::GetTime();
+		if (lastActivity == 0.0) lastActivity = now;
+		if (ImGui::IsMouseDown(0) || ImGui::IsMouseDragging(0)) lastActivity = now;
+		if (now - lastActivity >= static_cast<double>(overlay::editAutoCloseSecs)) {
+			overlay::locked = true;
+			lastActivity = 0.0;
+			ShowToast("Edit mode closed (idle)", 2.5f);
+			LogV("overlay: edit mode auto-closed after idle");
+		}
+	} else {
+		// reset the idle clock whenever edit mode isn't active
+		// (static above persists; re-seed on next unlock)
+	}
+
+	// Keep the client-rect (used to anchor every overlay window) in sync with the
+	// live window size. It's only seeded once at font init, so without this a
+	// window resize leaves everything anchored to the OLD dimensions - corner
+	// windows drift off-screen and the layout looks broken. On a real size change,
+	// re-snap the corner-anchored windows to the new dimensions.
+	{
+		RECT rc;
+		if (GetClientRect(Base::Data::hWindow, &rc) && rc.right > rc.left && rc.bottom > rc.top) {
+			if (rc.right != Base::Data::HACK_clientRect.right || rc.bottom != Base::Data::HACK_clientRect.bottom
+				|| rc.left != Base::Data::HACK_clientRect.left || rc.top != Base::Data::HACK_clientRect.top) {
+				Base::Data::HACK_clientRect = rc;
+				overlay::forceReposition = true;
+			}
+		}
+	}
+
 	ImGui_ImplDX9_NewFrame();
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
@@ -2488,9 +3668,25 @@ void overlay::Render(const HWND hWnd, const LPDIRECT3DDEVICE9 pDevice) {
 
 	ApplyTheme();
 
+	overlay::RenderSpeedrun();
+
+	// Tick the binocular every frame (incl. menus) so it can force-clear on ESC.
+	overlay::BinocularTick(pDevice);
+
 	// Main menu: only the version watermark; all gameplay overlays skipped.
 	if (overlay::inMenu) {
 		RenderWatermark();
+		ImGui::PopFont();
+		ImGui::EndFrame();
+		ImGui::Render();
+		PresentImGui(pDevice);
+		return;
+	}
+
+	// Binocular zoom mask (under the HUD, over the game). Runs even if the HUD is
+	// hidden - so bail to the frame end afterwards when the HUD shouldn't draw.
+	overlay::RenderBinocular(pDevice);
+	if (!overlay::shown) {
 		ImGui::PopFont();
 		ImGui::EndFrame();
 		ImGui::Render();
@@ -2546,6 +3742,7 @@ void overlay::Render(const HWND hWnd, const LPDIRECT3DDEVICE9 pDevice) {
 	RenderProgress();
 	RenderFlashlightGauge();
 	RenderReport();
+	RenderHealthBar(pDevice);
 	RenderToast();
 
 	// The reposition request applied to this frame's windows; consume it.
