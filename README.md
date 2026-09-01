@@ -244,4 +244,4 @@ marker in `silta.log`.
 - **Radiation dose isn't read from the game** — INFRA keeps the reactor's rising dose in map
   logic, not on the player, so the photo effect is driven by hand-placed zones / the geiger /
   a map-wide baseline rather than the exact in-game value. The wizard also shows layout-specific
-  keys (e.g. an ABNT `Ã`) by their hex code rather than a pretty name, though they bind fine.
+  keys (e.g. an ABNT `Ã`) by their hex code rather than a pretty name, though they bind fine.
