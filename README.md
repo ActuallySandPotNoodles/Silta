@@ -141,8 +141,7 @@ Everything below is configurable (or fully disableable) in `silta.ini`.
   sphere that keeps a zone asleep until you reach it. The reactor and the bunker (lab / demon
   core / uranium hangar) ship pre-surveyed.
 - **Ambient radiation** (`[radiation_ambient]`) — a map-wide random baseline outside zones, for
-  maps that are hot all over (roof, wasteland). On maps that use the game's geiger (e.g.
-  `infra_ee_wasteland`) the grain triggers automatically from the live reading.
+  maps that are hot all over (roof, wasteland).
 - Collect coordinates for your own maps with the `mark_position` hotkey (writes ZONE-MARK lines
   to `silta.log`); both config sections are heavily commented in `silta.ini`.
 
