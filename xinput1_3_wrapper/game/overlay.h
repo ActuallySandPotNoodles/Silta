@@ -7,7 +7,7 @@ namespace overlay {
 	// SILTA - Finnish for "bridge": Siltanen's field kit, bridging INFRA to your
 	// survey tools. Bump kVersion per release.
 	constexpr const char* kModName = "SILTA";
-	constexpr const char* kVersion = "0.933";
+	constexpr const char* kVersion = "0.956";
 	extern bool  watermark;         // small corner tag with name+version (menu only)
 	extern int   watermarkCorner;   // 0 TL, 1 TR, 2 BL, 3 BR
 	extern std::string watermarkText; // override text (empty = "SILTA v<ver>")
@@ -133,12 +133,16 @@ namespace overlay {
 	extern bool   sketchSurvey;     // draw a survey grid + title block
 	extern bool   sketchTransparent;// transparent page (trace over the game)
 	extern bool   sketchSmooth;     // bilinear (soft) vs point (crisp) canvas display
-	extern int    sketchDefaultBrush; // starting brush size
+	extern int    sketchDefaultBrush;
+	extern int    sketchDefaultBrushType; // 0 Pen 1 Marker 2 Spray 3 Chalk 4 Square // starting brush size
 	extern float  sketchDefaultInk[3];// starting ink colour (RGB 0..1)
 
 	// Shared survey identity (sketch title block + camera photo caption).
 	extern std::string surveyorName; // e.g. "M. SILTANEN"
 	extern std::string surveyDate;   // e.g. "08.08.2016"
+	extern bool inLoreDateAuto;      // roll the survey/EXIF date per map (past midnight)
+	int  CurrentMapMinutes();        // canon minutes from day-1 00:00 (-1 unknown)
+	std::string InLoreSurveyDate();  // "DD.MM.YYYY" for the current map
 
 	// Current map's friendly location name (set on map load when known).
 	extern std::string locationName;
@@ -198,6 +202,8 @@ namespace overlay {
 		int toggleContact;
 		int clearLog;
 		int dumpHeld;   // log full identity of the held object (for [pickup_names])
+		int toggleMenu; // Show / hide ALL overlays (was hardcoded to Insert)
+		int markPosition; // log current map+position (for defining radiation zones etc.)
 	};
 	extern Hotkeys hotkeys;
 
@@ -223,6 +229,38 @@ namespace overlay {
 	extern int srProbeCount;          // how many consecutive floats the probe dumps
 	extern bool srScanOffsets;        // AUTO-FINDER: sweep the player struct for vel/pos
 	void ResetOffsetScan();           // restart the auto-finder's tracking
+	extern unsigned int radiationOffset; // player-struct offset of m_flgeigerRange (0=off)
+	extern bool radiationReadout;        // log the geiger value (to confirm offset at the reactor)
+	extern bool flashlightDebug;         // log flashlight upgraded/on/counter state
+	extern bool flashSubtleTimer;        // show the time/days readout on the subtle skin too
+	void  TickRadiation();               // read m_flgeigerRange each frame
+	extern bool bindWizardButtonMenu;    // show the 'Bind keys' button on the main menu (default on)
+	extern bool bindWizardButtonIngame;  // show it in-game at the pause menu too (default off)
+	extern float bindWizardButtonX;      // button X on the menu (-1 = auto, left margin)
+	extern float bindWizardButtonY;      // button Y on the menu (-1 = auto, near the bottom)
+	void  RenderBindWizard();            // the press-to-capture rebinding UI
+	bool  BindCaptureKey(int vk);        // WndProc feeds keydowns here while capturing
+	void  OpenBindWizard();
+	bool  BindWizardActive();            // true while the wizard window is open
+	void  LoadBindsFile();               // apply silta_binds.ini over [hotkeys]
+	float RadiationRange();              // last read value (-1 = unknown)
+	extern bool  photoRadiationNoise;    // add grain to photos taken in radiation
+	extern float radiationNoiseStrength; // grain amount 0..1
+	float PhotoRadiationNoise();         // per-photo grain amount [0..1] (game thread)
+	struct RadZone {
+		std::string mapFrag;
+		bool  isBox = false;              // false: sphere at x,y,z radius r; true: box min(x,y,z)..max(x2,y2,z2)
+		float x = 0, y = 0, z = 0, r = 0;
+		float x2 = 0, y2 = 0, z2 = 0;
+		float strength = -1.0f;           // -1 = use radiation_noise_strength
+		float rampSec = 0.0f;             // >0: exposure builds over cumulative in-zone time
+		bool  hasTrigger = false;         // zone inert until the trigger sphere is touched
+		float tx = 0, ty = 0, tz = 0, tr = 0;
+		bool  armed = false;              // runtime: trigger touched this map
+	};
+	extern std::vector<RadZone> radZones; // authoritative where defined (see [radiation_zones])
+	struct RadAmbient { std::string mapFrag; float base; float variance; }; // map-wide random baseline
+	extern std::vector<RadAmbient> radAmbients;
 	extern bool srDeathToast;         // pop a "Death #n" toast on death
 	extern int  srPanelX, srPanelY;   // speedrun panel starting position (px)
 	extern float srBgAlpha;           // speedrun panel background opacity

@@ -28,6 +28,7 @@ void LogV(const std::string&); // silta.log verbose (defined in infra.cpp)
 #include "inventory.h"
 #include "counters.h"
 #include "functional_camera.h"
+#include "SimpleIni.h" // bind wizard reads/writes silta_binds.ini
 #include "infra.h"
 using infra::Engine;
 #include <map>
@@ -181,10 +182,95 @@ bool   overlay::sketchSurvey = true;
 bool   overlay::sketchTransparent = false;
 bool   overlay::sketchSmooth = true;
 int    overlay::sketchDefaultBrush = 4;
+int    overlay::sketchDefaultBrushType = 0;
 float  overlay::sketchDefaultInk[3] = { 0.10f, 0.12f, 0.40f };
 std::string overlay::surveyorName = "M. SILTANEN";
 std::string overlay::surveyDate = "08.08.2016";
 std::string overlay::locationName = "";
+bool overlay::inLoreDateAuto = true;
+
+// ----- In-lore clock: map -> canon date/time -----
+// INFRA runs from the morning of 08.08.2016 and crosses midnight into 09.08.2016
+// at officeblackout (Ch8), continuing through the endings (Ch10-11). We map each
+// map's trailing name fragment to absolute minutes from day-1 00:00; >= 1440 =
+// next day. Times follow the wiki chapter order (stalburg.net/INFRA/Locations).
+// Matched by "map name ends with fragment", longest fragment first, so
+// office/officeblackout, sewer/sewer2/sewer3, business/business2, metro/metroride,
+// powerstation/powerstation2 never collide.
+namespace {
+	struct MapTime { const char* frag; int minutes; };
+	const MapTime kMapTimes[] = {
+		// Day 1 (08.08) - Act 1
+		{ "office", 480 }, { "reserve1", 540 }, { "reserve2", 570 }, { "reserve3", 600 },
+		{ "tunnel1", 660 }, { "tunnel2", 690 }, { "tunnel3", 720 }, { "tunnel4", 750 },
+		{ "furnace", 810 }, { "tower", 840 },
+		{ "watertreatment", 900 }, { "sewer2", 960 }, { "sewer", 930 },
+		// Act 2
+		{ "sewer3", 1020 }, { "metroride", 1080 }, { "metro", 1050 }, { "waterplant", 1110 },
+		{ "minitrain", 1140 }, { "central", 1170 },
+		{ "servicetunnel", 1200 }, { "skyscraper", 1230 }, { "bunker", 1260 },
+		{ "stormdrain", 1290 }, { "cistern", 1320 }, { "powerstation2", 1380 }, { "powerstation", 1350 },
+		// Act 3 - still 08.08 up to business2, then midnight
+		{ "isle1", 1400 }, { "isle2", 1415 }, { "isle3", 1425 },
+		{ "business2", 1437 }, { "business", 1432 },
+		// Day 2 (09.08) - from officeblackout on
+		{ "officeblackout", 1440 }, { "rails", 1470 }, { "tenements", 1500 },
+		{ "river", 1530 }, { "villa", 1560 }, { "field", 1590 },
+		{ "npp", 1650 }, { "reactor", 1710 }, { "roof", 1740 },
+		{ "ending_1", 1770 }, { "ending_2", 1770 }, { "ending_3", 1770 },
+		// Easter eggs
+		{ "hallway", 720 }, { "wasteland", 1410 }, { "city_gates", 1470 },
+	};
+
+	bool StrEndsWith(const char* s, const char* suf) {
+		const size_t ls = strlen(s), lf = strlen(suf);
+		return (ls >= lf) && (strcmp(s + (ls - lf), suf) == 0);
+	}
+
+	void AddDays(int& y, int& mo, int& d, int n) {
+		static const int dim[12] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+		while (n-- > 0) {
+			int dm = dim[mo - 1];
+			if (mo == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) dm = 29;
+			if (d < dm) { ++d; }
+			else { d = 1; if (++mo > 12) { mo = 1; ++y; } }
+		}
+	}
+}
+
+// Absolute minutes from day-1 00:00 for the current map, or -1 if unknown.
+int overlay::CurrentMapMinutes() {
+	const char* mn = (Engine() != nullptr) ? Engine()->get_map_name() : nullptr;
+	if (mn == nullptr || mn[0] == '\0') return -1;
+	int best = -1; size_t bestLen = 0;
+	for (const MapTime& e : kMapTimes) {
+		const size_t L = strlen(e.frag);
+		if (L > bestLen && StrEndsWith(mn, e.frag)) { best = e.minutes; bestLen = L; }
+	}
+	return best;
+}
+
+// Survey date "DD.MM.YYYY" for the current map (rolls to the next day past
+// midnight). Falls back to the static configured date if auto is off or the map
+// isn't in the table.
+std::string overlay::InLoreSurveyDate() {
+	if (!overlay::inLoreDateAuto) return overlay::surveyDate;
+	const int mins = CurrentMapMinutes();
+	if (mins < 0) return overlay::surveyDate;
+	int d = 8, mo = 8, y = 2016;
+	// parse the configured base "DD.MM.YYYY"
+	if (overlay::surveyDate.size() >= 10) {
+		int pd = atoi(overlay::surveyDate.substr(0, 2).c_str());
+		int pm = atoi(overlay::surveyDate.substr(3, 2).c_str());
+		int py = atoi(overlay::surveyDate.substr(6, 4).c_str());
+		if (pd >= 1 && pm >= 1 && py >= 1) { d = pd; mo = pm; y = py; }
+	}
+	AddDays(y, mo, d, mins / 1440);
+	char b[16];
+	sprintf_s(b, sizeof(b), "%02d.%02d.%04d", d, mo, y);
+	return std::string(b);
+}
+
 
 // Toast state (brief on-screen confirmation).
 static std::string g_ToastText;
@@ -239,6 +325,10 @@ overlay::Hotkeys overlay::hotkeys = {
 	VK_F2,  // toggleCalculator (borrowed from the old decoder)
 	VK_F1,  // toggleEnding (study outlook)
 	VK_F5,  // toggleContact (contact sheet)
+	0xBF,   // clearLog (the / key)
+	0,      // dumpHeld (unbound by default)
+	VK_INSERT, // toggleMenu (Show / hide overlay)
+	0,      // markPosition (unbound by default)
 };
 
 // ----- Notes scratchpad backing store -----
@@ -719,6 +809,7 @@ namespace {
 	float g_FlashDrainPerSec = 0.0f;      // measured normal-battery drain (charge units/sec)
 	unsigned long long g_FlashLastTick = 0;
 	bool  g_FlashUpgraded = false;
+	bool  g_FlashOn = false; // flashlight currently on
 }
 
 // Accumulate flashlight-on time only once the flashlight is upgraded, so the
@@ -733,6 +824,23 @@ void overlay::TickFlashlightBattery() {
 		        : "flashlight: normal flashlight");
 	}
 	g_FlashUpgraded = up;
+	g_FlashOn = on;
+	if (overlay::flashlightDebug) {
+		static unsigned long long dbgNext = 0;
+		const unsigned long long t = GetTickCount64();
+		if (t >= dbgNext) {
+			char b[144];
+			sprintf_s(b, sizeof(b),
+				"flashlight-dbg: upgraded(@0x18A4)=%d on=%d charge=%d chargeCounter=%s batteryCounter=%s gauge=%d skin=%d",
+				up ? 1 : 0, on ? 1 : 0,
+				mod::inventory::flashlightChargeCounter ? *mod::inventory::flashlightChargeCounter : -1,
+				mod::inventory::flashlightChargeCounter ? "yes" : "no",
+				mod::inventory::flashlightBatteriesCounter ? "yes" : "no",
+				overlay::flashGauge ? 1 : 0, overlay::flashGaugeSkin);
+			LogRaw(b);
+			dbgNext = t + 1000;
+		}
+	}
 	const unsigned long long now = GetTickCount64();
 	if (g_FlashLastTick == 0) g_FlashLastTick = now;
 	unsigned long long dt = now - g_FlashLastTick;
@@ -750,7 +858,10 @@ static void RenderFlashlightGauge() {
 	int val = 0;
 	if (live) {
 		val = *mod::inventory::flashlightChargeCounter;
-		if (val < 0 || val > 100000) return; // offset is wrong - don't render garbage
+		if (val < 0 || val > 100000) {
+			if (g_FlashUpgraded) { upgradedFull = true; val = 100; } // infinite light, odd charge value
+			else return; // normal light with a bad offset - don't render garbage
+		}
 	} else if (mod::inventory::flashlightBatteriesCounter != nullptr) {
 		val = *mod::inventory::flashlightBatteriesCounter;
 	} else if (g_FlashUpgraded) {
@@ -769,11 +880,27 @@ static void RenderFlashlightGauge() {
 	if (lastVal != INT_MIN && (live ? (val < lastVal) : (val != lastVal))) {
 		showUntil = now + static_cast<double>(overlay::flashGaugeSeconds);
 	}
+	// Show the gauge when something HAPPENS - the flashlight toggling on/off, or
+	// the charge changing - then linger and fade. (0.938 kept it up the whole time
+	// the light was on, which never faded; this restores the fade while still
+	// covering the constant-charge upgraded light via the on/off transition.)
+	static bool prevOn = false;
+	if (g_FlashOn != prevOn) {
+		prevOn = g_FlashOn;
+		showUntil = now + static_cast<double>(overlay::flashGaugeSeconds);
+	}
+	// The UPGRADED flashlight shows a FIXED cosmetic readout (days-left): pin the
+	// gauge while the light is on instead of fading, so the number is always
+	// there. The NORMAL flashlight keeps the show-then-fade behavior.
+	if (g_FlashUpgraded && g_FlashOn) {
+		showUntil = now + 3600.0; // effectively persistent while on; fades once off
+	}
 	// Estimate the normal battery's drain (charge units/sec) from the interval
 	// between live decreases, so the gauge can show a real "time left". Increases
 	// (battery swaps) are ignored.
 	static double lastChangeT = 0.0;
 	if (live && lastVal != INT_MIN && val != lastVal) {
+		if (!g_FlashUpgraded) showUntil = now + static_cast<double>(overlay::flashGaugeSeconds); // re-show while draining
 		if (val < lastVal && lastChangeT > 0.0) {
 			const double dt = now - lastChangeT;
 			if (dt > 0.10 && dt < 10.0) {
@@ -913,12 +1040,12 @@ static void RenderFlashlightGauge() {
 		}
 	}
 
-	// Time estimate under the gauge - shown only on the default/custom skins
-	// (the subtle skin stays clean). The UPGRADED flashlight is effectively
+	// Time estimate under the gauge - default/custom skins always show it; the
+	// subtle skin shows it only when flashlight_subtle_timer is on. The UPGRADED flashlight is effectively
 	// infinite, so it shows a cosmetic day countdown from upgraded_days; the
 	// NORMAL flashlight shows the real time until the current battery hits zero,
 	// estimated from its measured live drain rate.
-	if (!subtle) {
+	if (!subtle || overlay::flashSubtleTimer) {
 		const float kUpgradedCosmeticLifeMin = 180.0f; // flashlight-on minutes for the cosmetic days to reach 0
 		char tb[28];
 		bool have = false;
@@ -1160,7 +1287,8 @@ bool overlay::WantsToCapture(UINT uMsg) {
 		(overlay::sketchEnabled && overlay::sketchShown) ||
 		(overlay::calcEnabled && overlay::calcShown) ||
 		(overlay::endingEnabled && overlay::endingShown) ||
-		(overlay::contactEnabled && overlay::contactShown);
+		(overlay::contactEnabled && overlay::contactShown) ||
+		overlay::BindWizardActive();
 	if (!typingWindowOpen) {
 		return false;
 	}
@@ -1271,7 +1399,7 @@ static void RenderHotkeyTips() {
 		if (vk != 0) rows.emplace_back(vk, desc);
 	};
 
-	row(Base::Data::Keys::ToggleMenu, "Show / hide overlay");
+	row(overlay::hotkeys.toggleMenu, "Show / hide overlay");
 	row(hk.reloadConfig, "Reload config");
 	row(hk.toggleCounters, "Toggle counters");
 	row(hk.toggleInventory, "Toggle inventory");
@@ -1377,6 +1505,18 @@ unsigned int overlay::srPosOffset = 0;
 unsigned int overlay::srProbeOffset = 0;
 int          overlay::srProbeCount = 8;
 bool         overlay::srScanOffsets = false;
+unsigned int overlay::radiationOffset = 0xDE4; // m_flgeigerRange (from server UpdateGeigerCounter)
+bool         overlay::radiationReadout = false;
+bool         overlay::flashlightDebug = false;
+bool         overlay::flashSubtleTimer = false;
+bool         overlay::bindWizardButtonMenu = true;
+bool         overlay::bindWizardButtonIngame = false;
+float        overlay::bindWizardButtonX = -1.0f;
+float        overlay::bindWizardButtonY = -1.0f;
+bool         overlay::photoRadiationNoise = false;
+std::vector<overlay::RadZone> overlay::radZones;
+std::vector<overlay::RadAmbient> overlay::radAmbients;
+float        overlay::radiationNoiseStrength = 0.5f;
 bool         overlay::srDeathToast = false;
 int          overlay::srPanelX = 12;
 int          overlay::srPanelY = 12;
@@ -1640,6 +1780,211 @@ void overlay::TickSpeedrun() {
 
 // Restart the offset auto-finder's min/max tracking (called on config reload).
 void overlay::ResetOffsetScan() { ResetScan(); }
+
+// ----- Radiation (m_flgeigerRange) readout -----
+// INFRA sends the client a 1-byte Geiger usermessage derived from the player's
+// geiger range float; the server computes it in UpdateGeigerCounter as
+// range@0xDE4 * scale. Smaller range = closer to a radiation source = more
+// intense. We read that float so the camera can later fog photos in proportion.
+// Stage one: expose + log the value so the offset can be confirmed at the reactor.
+namespace {
+	float g_RadiationRange = -1.0f;          // last read m_flgeigerRange (-1 = unknown)
+	unsigned long long g_RadLogNext = 0;
+	// Dose-finder: the value that ramps 0 -> ~1000 (and kills you) may be a
+	// separate float on the player. Sweep for one that climbed from low to high.
+	const int kDoseFloats = 0x1800 / 4;
+	float g_DoseMin[kDoseFloats];
+	float g_DoseMax[kDoseFloats];
+	bool  g_DoseInit = false;
+	unsigned long long g_DoseLogNext = 0;
+
+	void ScanRadiationDose(void* player) {
+		if (!g_DoseInit) { for (int i = 0; i < kDoseFloats; ++i) { g_DoseMin[i] = 1e30f; g_DoseMax[i] = -1e30f; } g_DoseInit = true; }
+		static float buf[kDoseFloats];
+		if (!SafeReadBlock(buf, player, 0x1800)) return;
+		for (int i = 0; i < kDoseFloats; ++i) {
+			const float v = buf[i];
+			if (!std::isfinite(v)) continue;
+			if (v < g_DoseMin[i]) g_DoseMin[i] = v;
+			if (v > g_DoseMax[i]) g_DoseMax[i] = v;
+		}
+		const unsigned long long now = GetTickCount64();
+		if (now < g_DoseLogNext) return;
+		g_DoseLogNext = now + 2000;
+		int shown = 0;
+		for (int i = 0; i < kDoseFloats && shown < 8; ++i) {
+			// climbed from near-zero to a plausible dose range (0..1200).
+			if (g_DoseMin[i] < 50.0f && g_DoseMax[i] > 100.0f && g_DoseMax[i] < 1200.0f) {
+				char b[96];
+				sprintf_s(b, sizeof(b), "DOSE? radiation_offset=0x%X (rose %.0f -> %.0f)", i * 4, g_DoseMin[i], g_DoseMax[i]);
+				LogRaw(b); shown++;
+			}
+		}
+		if (shown == 0) LogRaw("DOSE: no rising float yet - stay in radiation and let the dose climb");
+	}
+}
+float overlay::RadiationRange() { return g_RadiationRange; }
+
+// ----- Radiation-map detection + per-photo grain amount -----
+namespace {
+	bool g_MapHadRadiation = false;   // geiger has dropped below "safe" on this map
+	bool g_MapHasZones = false;       // user-defined radiation zones exist for this map
+	bool g_InZone = false;            // player currently inside one of them
+	float g_ZoneStrength = -1.0f;     // active zone's strength override (-1 = global)
+	float g_ZoneRampSec = 0.0f;       // active zone's ramp-up time (0 = instant)
+	float g_InZoneMs = 0.0f;          // cumulative time spent inside zones this map
+	unsigned long long g_ZoneTick = 0;
+	char g_LastMap[96] = { 0 };
+
+	// True if the current map name looks like a radiation map (for maps that
+	// don't drive the geiger, e.g. the reactor). Case-insensitive substring.
+	bool MapNameIsRadiation() {
+		const char* mn = (Engine() != nullptr) ? Engine()->get_map_name() : nullptr;
+		if (mn == nullptr || mn[0] == '\0') return false;
+		char low[96]; int i = 0;
+		for (; mn[i] != '\0' && i < 95; ++i) { char c = mn[i]; if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a'); low[i] = c; }
+		low[i] = '\0';
+		static const char* kKeys[] = { "reactor", "wasteland", "radioact", "nuclear", "fallout" };
+		for (const char* k : kKeys) if (strstr(low, k) != nullptr) return true;
+		return false;
+	}
+}
+
+// Map-wide random baseline for the current map: base +/- variance, randomized per
+// photo. Returns -1 if this map has no ambient entry.
+static float AmbientForCurrentMap() {
+	if (overlay::radAmbients.empty()) return -1.0f;
+	const char* mn = (Engine() != nullptr) ? Engine()->get_map_name() : nullptr;
+	if (mn == nullptr) return -1.0f;
+	const overlay::RadAmbient* best = nullptr; size_t bestLen = 0;
+	for (const overlay::RadAmbient& a : overlay::radAmbients) {
+		const size_t L = a.mapFrag.size();
+		if (L > bestLen && strstr(mn, a.mapFrag.c_str()) != nullptr) { best = &a; bestLen = L; }
+	}
+	if (best == nullptr) return -1.0f;
+	static unsigned int rng = 0x51ED270Bu;
+	rng = rng * 1664525u + 1013904223u;
+	const float r = static_cast<float>(rng >> 8) / static_cast<float>(1u << 24); // 0..1
+	float v = best->base + (r * 2.0f - 1.0f) * best->variance;
+	if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+	return v;
+}
+
+// Grain amount [0..1] for the photo being taken now. Computed on the game thread.
+// Geiger < ~safe = definitely in radiation -> full strength. On a name-matched
+// radiation map with no live geiger (the reactor), fire randomly so it "at least
+// works sometimes". Elsewhere / non-radiation maps -> 0.
+float overlay::PhotoRadiationNoise() {
+	if (!overlay::photoRadiationNoise) return 0.0f;
+	// User-defined zones are authoritative on maps that have them: inside = grain,
+	// outside = clean, and the name-match randomness is disabled there.
+	// Inside a defined zone always wins (with its strength + ramp).
+	if (g_MapHasZones && g_InZone) {
+		float zs = (g_ZoneStrength > 0.0f) ? g_ZoneStrength
+			: ((overlay::radiationNoiseStrength > 0.0f) ? overlay::radiationNoiseStrength : 0.5f);
+		if (g_ZoneRampSec > 0.0f) {
+			float t = g_InZoneMs / (g_ZoneRampSec * 1000.0f);
+			if (t > 1.0f) t = 1.0f;
+			zs *= (0.2f + 0.8f * t);
+		}
+		return (zs > 1.0f) ? 1.0f : zs;
+	}
+	// Outside any zone: a map-wide ambient baseline applies if defined (random
+	// low/high). This is what covers "the rest of the map has low radiation".
+	const float amb = AmbientForCurrentMap();
+	if (amb >= 0.0f) return amb;
+	// Zone map with no ambient, and we're outside the zones -> clean.
+	if (g_MapHasZones) return 0.0f;
+	const float geiger = g_RadiationRange;
+	const bool nameMatch = MapNameIsRadiation();
+	if (!(g_MapHadRadiation || nameMatch)) return 0.0f; // only radiation maps
+	const float strength = (overlay::radiationNoiseStrength > 0.0f) ? overlay::radiationNoiseStrength : 0.5f;
+	if (geiger >= 0.0f && geiger < 500.0f) return strength; // geiger says: in radiation
+	if (nameMatch) {
+		// Reactor-type: no usable geiger, so ~50% of shots get a random dose.
+		static unsigned int rng = 0x9E3779B9u;
+		rng = rng * 1664525u + 1013904223u;
+		const float r = static_cast<float>(rng >> 8) / static_cast<float>(1u << 24);
+		if (r < 0.5f) return 0.0f;
+		return strength * (0.4f + 0.6f * r);
+	}
+	return 0.0f;
+}
+
+void overlay::TickRadiation() {
+	if (overlay::radiationOffset == 0 || Engine() == nullptr) return;
+	void* player = Engine()->CGlobalEntityList__FindEntityByName(nullptr, "!player");
+	if (player == nullptr) return;
+	float v = 0.0f;
+	if (!ReadPlayerFloats(player, overlay::radiationOffset, &v, 1)) return;
+	g_RadiationRange = v;
+	// Radiation-map detection for photo grain: latch once the geiger drops below
+	// "safe" (1000); reset when the map changes.
+	const char* mn = (Engine() != nullptr) ? Engine()->get_map_name() : nullptr;
+	if (mn != nullptr && strncmp(mn, g_LastMap, sizeof(g_LastMap) - 1) != 0) {
+		strncpy_s(g_LastMap, sizeof(g_LastMap), mn, _TRUNCATE);
+		g_MapHadRadiation = false;
+		g_InZoneMs = 0.0f; // fresh exposure clock per map
+		for (overlay::RadZone& zn : overlay::radZones) zn.armed = false; // triggers re-arm per map
+	}
+	if (v >= 0.0f && v < 900.0f) g_MapHadRadiation = true;
+	// User-defined radiation zones (spheres): evaluate whether this map has any
+	// and whether the player is inside one. Authoritative for the photo grain.
+	g_MapHasZones = false; g_InZone = false;
+	if (!overlay::radZones.empty() && mn != nullptr) {
+		float p[3] = { 0, 0, 0 };
+		const bool havePos = (overlay::srPosOffset != 0) && ReadPlayerFloats(player, overlay::srPosOffset, p, 3);
+		for (overlay::RadZone& zn : overlay::radZones) {
+			if (strstr(mn, zn.mapFrag.c_str()) == nullptr) continue;
+			g_MapHasZones = true;
+			if (!havePos) continue;
+			// Trigger arming: an inert zone wakes when its trigger sphere is touched.
+			if (zn.hasTrigger && !zn.armed) {
+				const float ax = p[0] - zn.tx, ay = p[1] - zn.ty, az = p[2] - zn.tz;
+				if (ax * ax + ay * ay + az * az <= zn.tr * zn.tr) {
+					zn.armed = true;
+					LogRaw("radiation: zone trigger armed");
+				}
+			}
+			if (zn.hasTrigger && !zn.armed) continue; // asleep until triggered
+			bool inside;
+			if (zn.isBox) {
+				inside = (p[0] >= zn.x && p[0] <= zn.x2 &&
+				          p[1] >= zn.y && p[1] <= zn.y2 &&
+				          p[2] >= zn.z && p[2] <= zn.z2);
+			} else {
+				const float dx = p[0] - zn.x, dy = p[1] - zn.y, dz = p[2] - zn.z;
+				inside = (dx * dx + dy * dy + dz * dz <= zn.r * zn.r);
+			}
+			if (inside) {
+				g_InZone = true;
+				g_ZoneStrength = zn.strength; // -1 = use global
+				g_ZoneRampSec = zn.rampSec;
+				break;
+			}
+		}
+	}
+	// Cumulative exposure clock for ramping zones (resets with the map, like the
+	// game's own dose).
+	{
+		const unsigned long long zt = GetTickCount64();
+		if (g_ZoneTick != 0 && g_InZone) {
+			unsigned long long dz = zt - g_ZoneTick;
+			if (dz < 1000) g_InZoneMs += static_cast<float>(dz);
+		}
+		g_ZoneTick = zt;
+	}
+	if (overlay::radiationReadout) {
+		ScanRadiationDose(player); // hunt the 0->1000 dose accumulator
+		const unsigned long long now = GetTickCount64();
+		if (now >= g_RadLogNext) {
+			char b[96];
+			sprintf_s(b, sizeof(b), "radiation: m_flgeigerRange=%.1f @0x%X (smaller = more radiation)", v, overlay::radiationOffset);
+			LogRaw(b); // LogRaw so it appears with verbose off
+			g_RadLogNext = now + 1500;
+		}
+	}
+}
 
 void overlay::RenderSpeedrun() {
 	if (!overlay::srShowTimer) return;
@@ -2530,6 +2875,7 @@ namespace {
 	bool                       g_SketchInited = false;
 	float                      g_BrushColor[3] = { 0.10f, 0.12f, 0.40f }; // ink blue
 	int                        g_BrushSize = 4;
+	int                        g_BrushType = 0; // 0 Pen 1 Marker 2 Spray 3 Chalk 4 Square 5 Pencil 6 Highlighter 7 Splatter
 	bool                       g_Eraser = false;
 	int                        g_LastPx = -1, g_LastPy = -1;
 
@@ -2606,6 +2952,18 @@ namespace {
 		unsigned char* p = &g_SketchPixels[(static_cast<size_t>(y) * W + x) * 4];
 		p[0] = r; p[1] = g; p[2] = b; p[3] = a;
 	}
+	// Alpha-blend ink onto whatever's already on the ink layer (for soft brushes).
+	inline void BlendPixel(int x, int y, unsigned char r, unsigned char g, unsigned char b, unsigned char a) {
+		const int W = overlay::sketchW, H = overlay::sketchH;
+		if (x < 0 || y < 0 || x >= W || y >= H || a == 0) return;
+		unsigned char* p = &g_SketchPixels[(static_cast<size_t>(y) * W + x) * 4];
+		const float af = a / 255.0f, ia = 1.0f - af;
+		p[0] = static_cast<unsigned char>(r * af + p[0] * ia);
+		p[1] = static_cast<unsigned char>(g * af + p[1] * ia);
+		p[2] = static_cast<unsigned char>(b * af + p[2] * ia);
+		int na = a + static_cast<int>(p[3] * ia);
+		p[3] = static_cast<unsigned char>(na > 255 ? 255 : na);
+	}
 
 	// Draw a string with the 5x7 font, scaled by `s`, top-left at (x,y).
 	void StampText(int x, int y, int s, const char* text, unsigned char r, unsigned char g, unsigned char b) {
@@ -2680,7 +3038,7 @@ namespace {
 			for (char& c : loc) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
 			StampText(tx, ty, ts, ("SURVEYOR: " + overlay::surveyorName).c_str(), hr, hg, hb); ty += 9 * ts;
 			StampText(tx, ty, ts, ("SITE: " + loc).c_str(), hr, hg, hb); ty += 9 * ts;
-			StampText(tx, ty, ts, ("DATE: " + overlay::surveyDate + "   N.C.G.").c_str(), hr, hg, hb);
+			StampText(tx, ty, ts, ("DATE: " + overlay::InLoreSurveyDate() + "   N.C.G.").c_str(), hr, hg, hb);
 		}
 
 		g_SketchBufDirty = true;
@@ -2717,6 +3075,7 @@ namespace {
 		static bool s_brushApplied = false;
 		if (!s_brushApplied) {
 			g_BrushSize = overlay::sketchDefaultBrush;
+			g_BrushType = overlay::sketchDefaultBrushType;
 			g_BrushColor[0] = overlay::sketchDefaultInk[0];
 			g_BrushColor[1] = overlay::sketchDefaultInk[1];
 			g_BrushColor[2] = overlay::sketchDefaultInk[2];
@@ -2727,7 +3086,8 @@ namespace {
 		g_SketchInited = true;
 	}
 
-	// Stamp a filled circular brush dab centred at (cx,cy).
+	// Stamp a brush dab centred at (cx,cy). Type selects the texture; the eraser
+	// is always a hard solid stamp regardless of type.
 	void SketchDab(int cx, int cy) {
 		const int rad = g_Eraser ? (g_BrushSize + 2) : g_BrushSize;
 		unsigned char r = 0, g = 0, b = 0, a = 255;
@@ -2740,10 +3100,59 @@ namespace {
 			b = static_cast<unsigned char>(g_BrushColor[2] * 255.0f);
 			a = 255;
 		}
+		const int type = g_Eraser ? 0 : g_BrushType;
+		const int r2 = rad * rad;
+		static unsigned int rng = 0x2545F491u;
 		for (int dy = -rad; dy <= rad; ++dy) {
 			for (int dx = -rad; dx <= rad; ++dx) {
-				if (dx * dx + dy * dy <= rad * rad) {
+				const int d2 = dx * dx + dy * dy;
+				switch (type) {
+				case 4: // Square (chisel) - hard filled square
 					PutPixel(cx + dx, cy + dy, r, g, b, a);
+					break;
+				case 2: // Spray (airbrush) - sparse random dots in the disc
+					if (d2 <= r2) {
+						rng = rng * 1664525u + 1013904223u;
+						if ((rng >> 8) % 100u < 22u) PutPixel(cx + dx, cy + dy, r, g, b, a);
+					}
+					break;
+				case 3: // Chalk - grainy disc (random skips leave texture)
+					if (d2 <= r2) {
+						rng = rng * 1664525u + 1013904223u;
+						if ((rng >> 8) % 100u < 68u) PutPixel(cx + dx, cy + dy, r, g, b, a);
+					}
+					break;
+				case 1: // Marker - soft disc, alpha falls off toward the edge (blended)
+					if (d2 <= r2) {
+						const float t = 1.0f - sqrtf(static_cast<float>(d2)) / static_cast<float>(rad > 0 ? rad : 1);
+						BlendPixel(cx + dx, cy + dy, r, g, b, static_cast<unsigned char>(a * (0.22f + 0.78f * t)));
+					}
+					break;
+				case 5: { // Pencil - tight hard core + light graphite scatter
+					const int core = (rad >= 3) ? (rad / 3) : 1;
+					if (d2 <= core * core) { PutPixel(cx + dx, cy + dy, r, g, b, a); break; }
+					if (d2 <= r2) {
+						rng = rng * 1664525u + 1013904223u;
+						if ((rng >> 8) % 100u < 12u) PutPixel(cx + dx, cy + dy, r, g, b, a);
+					}
+					break; }
+				case 6: // Highlighter - flat translucent disc (builds up when overdrawn)
+					if (d2 <= r2) BlendPixel(cx + dx, cy + dy, r, g, b, 70);
+					break;
+				case 7: { // Splatter - scattered blobs around the tip
+					if (d2 <= r2) {
+						rng = rng * 1664525u + 1013904223u;
+						if ((rng >> 8) % 1000u < 8u) { // sparse seeds...
+							const int br = 1 + static_cast<int>((rng >> 12) % (unsigned)(rad / 2 + 1)); // ...random blob size
+							for (int by = -br; by <= br; ++by)
+								for (int bx = -br; bx <= br; ++bx)
+									if (bx * bx + by * by <= br * br) PutPixel(cx + dx + bx, cy + dy + by, r, g, b, a);
+						}
+					}
+					break; }
+				default: // 0 Pen - hard solid disc
+					if (d2 <= r2) PutPixel(cx + dx, cy + dy, r, g, b, a);
+					break;
 				}
 			}
 		}
@@ -2900,6 +3309,9 @@ static void RenderSketch(LPDIRECT3DDEVICE9 dev) {
 		ImGui::SetNextItemWidth(120.0f);
 		ImGui::SliderInt("Brush", &g_BrushSize, 1, 40);
 		ImGui::SameLine();
+		ImGui::SetNextItemWidth(90.0f);
+		ImGui::Combo("Type", &g_BrushType, "Pen\0Marker\0Spray\0Chalk\0Square\0Pencil\0Highlighter\0Splatter\0");
+		ImGui::SameLine();
 		ImGui::Checkbox("Eraser", &g_Eraser);
 		ImGui::SameLine();
 		ImGui::Checkbox("Trace", &overlay::sketchTransparent);
@@ -2990,6 +3402,10 @@ extern LRESULT ImGui_ImplWin32_WndProcHandler(HWND hWnd, UINT msg, WPARAM wParam
 // (WndProc) and the GetAsyncKeyState polling fallback, with a short same-key
 // dedup so a press seen by both paths only fires once.
 void overlay::DispatchHotkey(int vk) {
+	// While a text field is active (Notes, calculator, sketch title...), keys are
+	// TYPING, not hotkeys. Without this, rebinding to a letter/digit made the
+	// overlay toggle while writing notes - the top rebinding complaint.
+	if (overlay::imGuiInitialized && ImGui::GetIO().WantTextInput) return;
 	static int lastVk = 0;
 	static unsigned long long lastMs = 0;
 	const unsigned long long now = GetTickCount64();
@@ -2997,13 +3413,29 @@ void overlay::DispatchHotkey(int vk) {
 	lastVk = vk; lastMs = now;
 
 	const overlay::Hotkeys& hk = overlay::hotkeys;
-	if (vk == Base::Data::Keys::ToggleMenu) {
+	if (hk.toggleMenu && vk == hk.toggleMenu) {
 		overlay::shown = !overlay::shown;
 		LogV(overlay::shown ? "hotkey: overlays SHOWN (toggle-menu)"
 			: "hotkey: overlays HIDDEN (toggle-menu / Insert) - this hides ALL overlays");
 	}
 	else if (hk.reloadConfig && vk == hk.reloadConfig) {
 		overlay::reloadRequested = true;
+	}
+	else if (hk.markPosition && vk == hk.markPosition) {
+		// Log map + position for zone-definition workflows.
+		void* pl = (Engine() != nullptr) ? Engine()->CGlobalEntityList__FindEntityByName(nullptr, "!player") : nullptr;
+		float p[3] = { 0, 0, 0 };
+		const char* mn = (Engine() != nullptr) ? Engine()->get_map_name() : nullptr;
+		if (pl != nullptr && overlay::srPosOffset != 0 && ReadPlayerFloats(pl, overlay::srPosOffset, p, 3)) {
+			char zb[160];
+			sprintf_s(zb, sizeof(zb), "ZONE-MARK: map=%s pos= %.0f %.0f %.0f", mn ? mn : "?", p[0], p[1], p[2]);
+			LogRaw(zb);
+			char tb[96];
+			sprintf_s(tb, sizeof(tb), "Marked %.0f %.0f %.0f", p[0], p[1], p[2]);
+			ShowToast(tb, 2.5f);
+		} else {
+			ShowToast("Mark failed (no player/position)", 2.5f);
+		}
 	}
 	else if (hk.clearLog && vk == hk.clearLog) {
 		ClearSiltaLog();
@@ -3076,10 +3508,10 @@ void overlay::PollHotkeys() {
 	};
 	const overlay::Hotkeys& hk = overlay::hotkeys;
 	const int keys[] = {
-		static_cast<int>(Base::Data::Keys::ToggleMenu), hk.reloadConfig, hk.toggleCounters,
+		hk.toggleMenu, hk.reloadConfig, hk.toggleCounters,
 		hk.toggleInventory, hk.cycleCountersCorner, hk.cycleInventoryCorner, hk.toggleLock,
 		hk.resetPosition, hk.toggleNotes, hk.toggleSketch, hk.toggleCalculator, hk.toggleEnding,
-		hk.toggleContact, overlay::debugReportKey
+		hk.toggleContact, hk.clearLog, hk.dumpHeld, hk.markPosition, overlay::debugReportKey
 	};
 	for (int vk : keys) {
 		if (edge(vk)) {
@@ -3091,11 +3523,211 @@ void overlay::PollHotkeys() {
 	}
 }
 
+// ================= Key-binding wizard (experimental) =================
+// Press-to-capture rebinding: the fix for "I can't change the default binds".
+// Typing a key NAME in the ini goes through a US-layout parser, so on localized
+// keyboards (German Ü, French AZERTY, Nordic, etc.) the resulting virtual-key
+// lands on the wrong physical key or an unreachable one - which is why F-key
+// defaults work for everyone but custom binds don't. Here we capture the RAW vk
+// Windows produced for the key the user actually pressed, so it's correct on any
+// layout. Binds persist to silta_binds.ini and override [hotkeys] on load.
+namespace {
+	struct BindAction { const char* key; const char* label; int* vk; };
+	// Built lazily because it points into overlay::hotkeys.
+	BindAction* BindTable(int& count) {
+		static BindAction t[] = {
+			{ "toggle_menu",            "Show / hide overlay", &overlay::hotkeys.toggleMenu },
+			{ "toggle_counters",        "Counters",            &overlay::hotkeys.toggleCounters },
+			{ "toggle_inventory",       "Batteries",           &overlay::hotkeys.toggleInventory },
+			{ "toggle_notes",           "Notes",               &overlay::hotkeys.toggleNotes },
+			{ "toggle_sketch",          "Sketchbook",          &overlay::hotkeys.toggleSketch },
+			{ "toggle_calculator",      "Calculator",          &overlay::hotkeys.toggleCalculator },
+			{ "toggle_ending",          "Study outlook",       &overlay::hotkeys.toggleEnding },
+			{ "toggle_contact",         "Contact sheet",       &overlay::hotkeys.toggleContact },
+			{ "toggle_lock",            "Lock / edit (F11)",   &overlay::hotkeys.toggleLock },
+			{ "reset_position",         "Reset positions",     &overlay::hotkeys.resetPosition },
+			{ "reload_config",          "Reload silta.ini",    &overlay::hotkeys.reloadConfig },
+			{ "cycle_counters_corner",  "Counters corner",     &overlay::hotkeys.cycleCountersCorner },
+			{ "cycle_inventory_corner", "Batteries corner",    &overlay::hotkeys.cycleInventoryCorner },
+			{ "clear_log",              "Clear log",           &overlay::hotkeys.clearLog },
+			{ "dump_held",              "Dump held item",      &overlay::hotkeys.dumpHeld },
+			{ "mark_position",          "Mark position",       &overlay::hotkeys.markPosition },
+		};
+		count = static_cast<int>(sizeof(t) / sizeof(t[0]));
+		return t;
+	}
+
+	bool g_BindWizardOpen = false;
+	int  g_BindCaptureIdx = -1;  // which row is waiting for a key (-1 none)
+
+	std::string KeyDisplayName(int vk) {
+		if (vk == 0) return "(unbound)";
+		if (vk >= VK_F1 && vk <= VK_F24) { char b[8]; sprintf_s(b, sizeof(b), "F%d", vk - VK_F1 + 1); return b; }
+		if ((vk >= '0' && vk <= '9') || (vk >= 'A' && vk <= 'Z')) { char b[2] = { static_cast<char>(vk), 0 }; return b; }
+		switch (vk) {
+		case VK_INSERT: return "Insert";  case VK_DELETE: return "Delete";
+		case VK_HOME: return "Home";      case VK_END: return "End";
+		case VK_PRIOR: return "PgUp";     case VK_NEXT: return "PgDn";
+		case VK_SPACE: return "Space";    case VK_RETURN: return "Enter";
+		case VK_TAB: return "Tab";        case VK_BACK: return "Backspace";
+		case VK_UP: return "Up";          case VK_DOWN: return "Down";
+		case VK_LEFT: return "Left";      case VK_RIGHT: return "Right";
+		case VK_OEM_3: return "` / ~";    case VK_OEM_MINUS: return "-";
+		case VK_OEM_PLUS: return "=";     case VK_OEM_2: return "/";
+		case VK_OEM_5: return "\\";       case VK_OEM_COMMA: return ",";
+		case VK_OEM_PERIOD: return ".";   case VK_OEM_1: return ";";
+		}
+		char b[8]; sprintf_s(b, sizeof(b), "0x%02X", vk); return b;
+	}
+
+	void SaveBindsFile() {
+		CSimpleIniA ini; ini.SetUnicode();
+		ini.LoadFile("silta_binds.ini"); // ok if missing
+		int n = 0; BindAction* t = BindTable(n);
+		for (int i = 0; i < n; ++i) ini.SetLongValue("binds", t[i].key, *t[i].vk);
+		ini.SaveFile("silta_binds.ini");
+	}
+}
+
+// Load silta_binds.ini over the parsed [hotkeys] (called after the ini parse).
+void overlay::LoadBindsFile() {
+	CSimpleIniA ini; ini.SetUnicode();
+	if (ini.LoadFile("silta_binds.ini") != SI_OK) return; // none yet
+	int n = 0; BindAction* t = BindTable(n);
+	for (int i = 0; i < n; ++i) {
+		long v = ini.GetLongValue("binds", t[i].key, -1);
+		if (v >= 0) *t[i].vk = static_cast<int>(v);
+	}
+	LogI("binds: loaded silta_binds.ini (overrides [hotkeys])");
+}
+
+void overlay::OpenBindWizard() { g_BindWizardOpen = true; }
+bool overlay::BindWizardActive() { return g_BindWizardOpen; }
+
+// Called from WndProc on every key-down. While a row is capturing, the next key
+// becomes that bind (Esc cancels). Returns true if the key was consumed.
+bool overlay::BindCaptureKey(int vk) {
+	if (g_BindCaptureIdx < 0) return false;
+	if (vk == VK_ESCAPE) { g_BindCaptureIdx = -1; return true; } // cancel, don't bind Esc
+	int n = 0; BindAction* t = BindTable(n);
+	if (g_BindCaptureIdx < n) {
+		*t[g_BindCaptureIdx].vk = vk;
+		SaveBindsFile();
+		overlay::ShowToast(std::string(t[g_BindCaptureIdx].label) + " -> " + KeyDisplayName(vk), 2.0f);
+	}
+	g_BindCaptureIdx = -1;
+	return true; // swallow the captured key
+}
+
+void overlay::RenderBindWizard() {
+	if (!overlay::imGuiInitialized) return;
+	const bool onMainMenu = overlay::inMenu; // same flag that shows the version watermark
+	// The button is only reachable when the cursor is up: the main menu, or in-game
+	// only when the pause menu is open (ESC). CursorIsVisible() is true in exactly
+	// those cases.
+	const bool cursorUp = CursorIsVisible();
+	if (!onMainMenu && !cursorUp && !g_BindWizardOpen) return; // in-game, no pause menu -> nothing
+
+	// Shared anchor for BOTH the button and the wizard window, so the window opens
+	// where the button is (not the opposite corner).
+	const float cw = static_cast<float>(Base::Data::HACK_clientRect.right - Base::Data::HACK_clientRect.left);
+	const float chh = static_cast<float>(Base::Data::HACK_clientRect.bottom - Base::Data::HACK_clientRect.top);
+	const float pad = 10.0f;
+	ImVec2 anchorPos, anchorPivot;
+	if (onMainMenu && overlay::bindWizardButtonX >= 0.0f && overlay::bindWizardButtonY >= 0.0f) {
+		anchorPos = ImVec2(overlay::bindWizardButtonX, overlay::bindWizardButtonY); anchorPivot = ImVec2(0.0f, 0.0f);
+	} else if (onMainMenu) {
+		// Above (or below) the SILTA version watermark, matching its corner.
+		const float lift = ImGui::GetTextLineHeightWithSpacing() + 8.0f;
+		switch (overlay::watermarkCorner) {
+		case 0:  anchorPos = ImVec2(pad, pad + lift);          anchorPivot = ImVec2(0.0f, 0.0f); break; // TL
+		case 2:  anchorPos = ImVec2(pad, chh - pad - lift);    anchorPivot = ImVec2(0.0f, 1.0f); break; // BL
+		case 3:  anchorPos = ImVec2(cw - pad, chh - pad - lift); anchorPivot = ImVec2(1.0f, 1.0f); break; // BR (default)
+		default: anchorPos = ImVec2(cw - pad, pad + lift);     anchorPivot = ImVec2(1.0f, 0.0f); break; // TR
+		}
+	} else {
+		// In-game pause menu: bottom-center.
+		anchorPos = ImVec2(cw * 0.5f, chh - pad); anchorPivot = ImVec2(0.5f, 1.0f);
+	}
+
+	// --- The button (shown while the wizard is closed) ---
+	const bool showButton = onMainMenu ? overlay::bindWizardButtonMenu : overlay::bindWizardButtonIngame;
+	if (showButton && !g_BindWizardOpen) {
+		ImGui::SetNextWindowBgAlpha(0.0f);
+		ImGui::SetNextWindowPos(anchorPos, ImGuiCond_Always, anchorPivot);
+		if (ImGui::Begin("##siltabindsbtn", nullptr,
+			ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize |
+			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBackground)) {
+			// INFRA-amber pill (no glyph - the default font is ASCII only).
+			ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(28, 24, 18, 230));
+			ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(70, 54, 26, 245));
+			ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(120, 88, 34, 255));
+			ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(240, 176, 74, 255));
+			ImGui::PushStyleColor(ImGuiCol_Border,        IM_COL32(240, 176, 74, 150));
+			ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4.0f);
+			ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 1.0f);
+			ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(14.0f, 7.0f));
+			if (ImGui::Button("SILTA - Bind keys")) g_BindWizardOpen = true;
+			ImGui::PopStyleVar(3);
+			ImGui::PopStyleColor(5);
+		}
+		ImGui::End();
+	}
+	if (!g_BindWizardOpen) return;
+
+	// --- The wizard window (amber, spawns at the same anchor as the button) ---
+	ImGui::PushStyleColor(ImGuiCol_WindowBg,      IM_COL32(20, 18, 14, 245));
+	ImGui::PushStyleColor(ImGuiCol_TitleBg,       IM_COL32(40, 32, 18, 245));
+	ImGui::PushStyleColor(ImGuiCol_TitleBgActive, IM_COL32(70, 54, 26, 250));
+	ImGui::PushStyleColor(ImGuiCol_Border,        IM_COL32(240, 176, 74, 140));
+	ImGui::PushStyleColor(ImGuiCol_Button,        IM_COL32(60, 48, 26, 235));
+	ImGui::PushStyleColor(ImGuiCol_ButtonHovered, IM_COL32(96, 74, 34, 250));
+	ImGui::PushStyleColor(ImGuiCol_ButtonActive,  IM_COL32(130, 98, 40, 255));
+	ImGui::PushStyleColor(ImGuiCol_Text,          IM_COL32(236, 226, 210, 255));
+	ImGui::PushStyleColor(ImGuiCol_Separator,     IM_COL32(240, 176, 74, 90));
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 5.0f);
+	ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
+
+	ImGui::SetNextWindowPos(anchorPos, ImGuiCond_Appearing, anchorPivot);
+	ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_Appearing);
+	if (ImGui::Begin("SILTA - Key Bindings", &g_BindWizardOpen, ImGuiWindowFlags_NoSavedSettings)) {
+		ImGui::PushStyleColor(ImGuiCol_Text, IM_COL32(240, 176, 74, 255));
+		ImGui::TextWrapped("Click Rebind, then press the key you want.");
+		ImGui::PopStyleColor();
+		ImGui::TextWrapped("Captures your real keyboard layout, so it works even if typing a key name in the ini didn't.");
+		ImGui::Separator();
+		int n = 0; BindAction* t = BindTable(n);
+		for (int i = 0; i < n; ++i) {
+			ImGui::PushID(i);
+			ImGui::Text("%-18s", t[i].label);
+			ImGui::SameLine(180.0f);
+			if (g_BindCaptureIdx == i) {
+				ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.2f, 1.0f), "< press a key (Esc cancels) >");
+			} else {
+				ImGui::Text("%s", KeyDisplayName(*t[i].vk).c_str());
+				ImGui::SameLine(320.0f);
+				if (ImGui::Button("Rebind")) g_BindCaptureIdx = i;
+				ImGui::SameLine();
+				if (ImGui::Button("Unbind")) { *t[i].vk = 0; SaveBindsFile(); }
+			}
+			ImGui::PopID();
+		}
+		ImGui::Separator();
+		ImGui::TextDisabled("Saved to silta_binds.ini (overrides [hotkeys]).");
+	}
+	ImGui::End();
+	ImGui::PopStyleVar(3);
+	ImGui::PopStyleColor(9);
+}
+
 void overlay::WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 	// Act only on the initial key-down, not on auto-repeat (lParam bit 30).
 	// F10 and Alt-combos arrive as WM_SYSKEYDOWN, so handle that too.
 	if ((uMsg == WM_KEYDOWN || uMsg == WM_SYSKEYDOWN) && !(lParam & (1 << 30))) {
 		const int vk = static_cast<int>(wParam);
+		// Binding wizard is capturing: this key becomes a bind; swallow it.
+		if (overlay::BindCaptureKey(vk)) return;
 		const overlay::Hotkeys& hk = overlay::hotkeys;
 
 		// Verbose: record every key-down the overlay actually receives, with the
@@ -3673,9 +4305,11 @@ void overlay::Render(const HWND hWnd, const LPDIRECT3DDEVICE9 pDevice) {
 	// Tick the binocular every frame (incl. menus) so it can force-clear on ESC.
 	overlay::BinocularTick(pDevice);
 
-	// Main menu: only the version watermark; all gameplay overlays skipped.
+	// Main menu: version watermark + the bind-keys button/wizard (everything else
+	// gameplay is skipped).
 	if (overlay::inMenu) {
 		RenderWatermark();
+		overlay::RenderBindWizard();
 		ImGui::PopFont();
 		ImGui::EndFrame();
 		ImGui::Render();
@@ -3744,6 +4378,7 @@ void overlay::Render(const HWND hWnd, const LPDIRECT3DDEVICE9 pDevice) {
 	RenderReport();
 	RenderHealthBar(pDevice);
 	RenderToast();
+	RenderBindWizard();
 
 	// The reposition request applied to this frame's windows; consume it.
 	overlay::forceReposition = false;

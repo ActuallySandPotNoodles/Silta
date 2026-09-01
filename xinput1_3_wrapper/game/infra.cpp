@@ -508,6 +508,10 @@ static int ParseKeyValue(const std::string& in, int fallback) {
 	std::string u = v;
 	for (char& c : u) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
 
+	// Explicit unbind: 0 / none / off (documented; previously "0" wrongly bound
+	// the number-0 key).
+	if (u == "0" || u == "NONE" || u == "OFF") return 0;
+
 	// hex / decimal
 	if (u.size() > 2 && u[0] == '0' && u[1] == 'X') {
 		return static_cast<int>(strtoul(u.c_str() + 2, nullptr, 16));
@@ -724,12 +728,85 @@ static std::string HexOfColor(const ImVec4& c) {
 		static_cast<int>(c.z * 255.0f + 0.5f));
 	return b;
 }
+// Append the keyboard reference + SILTA banner footer to silta.ini, but only if
+// it isn't already there. CSimpleIni rewrites the whole file on save (dropping any
+// trailing free-text), so this is called after every silta.ini save to keep the
+// footer present without ever duplicating it.
+static void EnsureIniFooter() {
+	{
+		std::ifstream in("silta.ini", std::ios::binary);
+		if (in.is_open()) {
+			std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+			if (content.find("SILTA keyboard / VK reference") != std::string::npos) return; // already present
+		}
+	}
+	std::ofstream foot("silta.ini", std::ios::app);
+	if (!foot.is_open()) return;
+	foot << "\n"
+		<< "; ============================================================\n"
+		<< "; SILTA keyboard / VK reference\n"
+		<< "; Hotkeys above use Win32 Virtual-Key codes (decimal).\n"
+		<< "; Full list of codes:\n"
+		<< ";   https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes\n"
+		<< "; Quick reference: F1=112 F2=113 F3=114 F4=115 F5=116 F6=117\n"
+		<< ";   F7=118 F8=119 F9=120 F10=121 F11=122 F12=123\n"
+		<< ";   INS=45 DEL=46 HOME=36 END=35 PGUP=33 PGDN=34\n"
+		<< ";   A-Z=65..90  0-9=48..57  SPACE=32  TAB=9  0=disabled\n"
+		<< "; (Easier: use the on-screen 'SILTA: Bind keys' button on the main menu.)\n"
+		<< "; ============================================================\n"
+		<< ";\n"
+		<< ";                                                                                             ###\n"
+		<< ";                                                                               ###         ######\n"
+		<< ";                                                                              #####        #######\n"
+		<< ";                                                                              ######        ######\n"
+		<< ";                                                                                            ######                          #########\n"
+		<< ";                                                                                  #####     ######                          ##############\n"
+		<< ";                                                                         ######   ######     ######                         #################\n"
+		<< ";                                                                     ###########   #####     ######                               ##############\n"
+		<< ";                                                                 ###############   ######     #####                                     ############\n"
+		<< ";                                                               ###########          #####     #####                                     #############\n"
+		<< ";                                                             ########               #####     #####      ##################             #####   ######\n"
+		<< ";                                                           #######                  #####      ################################         #####    ######\n"
+		<< ";                                                          ######                    #####      ################        ###########    #######      #######\n"
+		<< ";                                                          ############              #####       ########                   #######   #######        ######\n"
+		<< ";                                                          #################         #####                                     ###    ######           ##\n"
+		<< ";                                                            #################      ######                                             ###\n"
+		<< ";                                                                      #######        ##                                                        #############\n"
+		<< ";                                                                        #####                                                                  ####################\n"
+		<< ";                                                                      ######                                                                   ######################\n"
+		<< ";                                                                     ######                                                                                     ######\n"
+		<< ";                                                                   #######                                                                             ####       #####\n"
+		<< ";                                                                 #######                                                                              #######     #####\n"
+		<< ";                                                              #########                                                                                #######    #####\n"
+		<< ";                                                           ##########                                                                                    #######  #####\n"
+		<< ";                                                         ##########                                                                                       ####### #####\n"
+		<< ";                                                     ###########                                                                                            ###   #####\n"
+		<< ";                                                  ###########                                                                                                     #####\n"
+		<< ";                                              ###########                                                                                                         #####\n"
+		<< ";                                         #############                                                                                                            #####\n"
+		<< ";                                      ############                                                                                                                #####\n"
+		<< ";                                 #############                                                                                                                     ####\n"
+		<< ";                             #############\n"
+		<< ";                         ##############\n"
+		<< ";                     #############\n"
+		<< ";                ##############\n"
+		<< ";           #############\n"
+		<< ";       #############\n"
+		<< "; ##############\n"
+		<< "; ##########\n"
+		<< ";  #####\n"
+		<< ";\n"
+		<< ";        ___  __          ___  __   __           __   ___ ___           __   __\n"
+		<< "; | |\\ | |__  |__)  /\\      |  /  \\ /  \\ |    __ /__` |__   |      |\\/| /  \\ |  \\\n"
+		<< "; | | \\| |    |  \\ /~~\\     |  \\__/ \\__/ |___    .__/ |___  |      |  | \\__/ |__/ .\n";
+}
 void overlay::SaveGaugePos() {
 	CSimpleIniA ini;
 	if (ini.LoadFile("silta.ini") != SI_OK) return;
 	ini.SetLongValue("inventory", "gauge_x", static_cast<long>(overlay::gaugeX));
 	ini.SetLongValue("inventory", "gauge_y", static_cast<long>(overlay::gaugeY));
 	ini.SaveFile("silta.ini");
+	EnsureIniFooter();
 	LogI("gauge: position saved to silta.ini");
 }
 
@@ -743,6 +820,7 @@ void overlay::SaveCalcCustomColors() {
 	}
 	ini.SetValue("calculator", "skin", "custom");
 	ini.SaveFile("silta.ini");
+	EnsureIniFooter();
 	LogI("calculator: custom skin saved to silta.ini");
 }
 
@@ -854,11 +932,11 @@ static void load_config() {
 		config.SetBoolValue("overlay", "location_names", true,
 			"; Title the counters with the real in-world location (e.g. 'Bergmann Tunnels').");
 
-		config.SetLongValue("camera", "photo_width", 660,
+		config.SetLongValue("camera", "photo_width", 640,
 			"; ===== Camera photos =====\n"
-			"; Saved photo resolution. Default 660x480 = the IMAGE-IN Crystal-shot's\n"
+			"; Saved photo resolution. Default 640x480 = the IMAGE-IN Crystal-shot's\n"
 			"; in-lore 480p. Presets you might want:\n"
-			";   660  x 480   Crystal-shot 480p (lore-accurate, default)\n"
+			";   640  x 480   Crystal-shot 480p (lore-accurate, default)\n"
 			";   1280 x 720   720p\n"
 			";   1920 x 1080  1080p\n"
 			";   0    x 0     native capture (full engine resolution)\n"
@@ -905,6 +983,12 @@ static void load_config() {
 			"; Caption top-line colour (hex RRGGBB).");
 		config.SetValue("camera", "burn_in_text_color", "E6E6E6",
 			"; Caption bottom-line colour (hex RRGGBB).");
+		config.SetValue("camera", "burn_in_style", "band",
+			"; Caption look: 'band' = classic dark strip with two lines; 'plain' = the\n"
+			"; same two lines with a drop shadow, no strip; 'minimal' = one small quiet\n"
+			"; line (name + date) with a shadow.");
+		config.SetBoolValue("camera", "burn_in_top", false,
+			"; Put the caption along the top edge instead of the bottom.");
 		config.SetDoubleValue("camera", "burn_in_band", 0.35,
 			"; Caption band darkness: 0 = solid black strip, 1 = no strip (text only).");
 		config.SetBoolValue("camera", "subfolders", true,
@@ -915,10 +999,8 @@ static void load_config() {
 			"; Include an N.C.G. asset tag (site + filename) in the EXIF description.");
 		config.SetLongValue("camera", "player_origin_offset", 0,
 			"; *** DEBUG ONLY *** Player-origin source for EXIF coordinates. Leave at 0\n"
-			"; = built-in (offset 0x2C,\n"
-			"; found via SILTA calibrate - works on the current game build). Set a\n"
-			"; positive byte offset to override it if a future patch moves the struct\n"
-			"; (re-run calibrate to find it), or -1 to disable coordinates entirely.");
+			"; = built-in (offset 0x2C). Set a positive byte offset to override it if a\n"
+			"; future patch moves the struct, or -1 to disable coordinates entirely.");
 		config.SetBoolValue("camera", "exif_gps", true,
 			"; Map coordinates to EXIF GPS tags. Cosmetic mapping: the world origin is\n"
 			"; anchored where Stolland canonically sits - the open Baltic Sea between\n"
@@ -995,8 +1077,11 @@ static void load_config() {
 			"; Mask colour R,G,B (0-255). Default black.");
 		config.SetLongValue("binocular", "fade_ms", 120,
 			"; Fade in/out duration in milliseconds.");
-		config.SetBoolValue("binocular", "sound", true,
-			"; Play the phone deploy/holster jacket sound on zoom in/out.");
+		config.SetBoolValue("binocular", "sound", false,
+			"; Play the phone deploy/holster jacket sound on zoom in/out. OFF: the\n"
+			"; playgamesound route isn't firing reliably on the current build, so it's\n"
+			"; disabled until fixed - the sound_deploy/sound_holster names below are\n"
+			"; kept for when it works again.");
 		config.SetValue("binocular", "sound_deploy", "Item.Deploy",
 			"; Soundscript played on zoom in (playgamesound <name>).");
 		config.SetValue("binocular", "sound_holster", "Item.Holster",
@@ -1063,7 +1148,7 @@ static void load_config() {
 		config.SetValue("inventory", "gauge_custom_fill_high", "78DC78");
 		config.SetValue("inventory", "gauge_custom_fill_mid", "EBC85A");
 		config.SetValue("inventory", "gauge_custom_fill_low", "EB5A50");
-		config.SetValue("inventory", "hidden_maps", "infra_c1_m1",
+		config.SetValue("inventory", "hidden_maps", "",
 			"; Comma-separated map-name fragments where the inventory overlay is hidden\n"
 			"; entirely (maps that never use it - the office prologue has no flashlight\n"
 			"; or camera). Add more fragments if other maps follow the same logic.");
@@ -1102,6 +1187,9 @@ static void load_config() {
 		config.SetBoolValue("sketch", "smooth", true,
 			"; Canvas display: false = crisp (point sampling, no edge fringe),\n; true = smooth (bilinear, softer but can fringe stroke edges).");
 		config.SetLongValue("sketch", "default_brush", 4, "; Starting brush size (1-40).");
+		config.SetLongValue("sketch", "default_brush_type", 0,
+			"; Starting brush: 0 Pen, 1 Marker (soft), 2 Spray, 3 Chalk, 4 Square,\n"
+			"; 5 Pencil, 6 Highlighter (translucent), 7 Splatter.");
 		config.SetValue("sketch", "paper_color", "F7F5EB",
 			"; Sketchbook colors (hex RRGGBB, or RRGGBBAA where alpha matters).\n"
 			"; paper_color = window background; ink_color = toolbar text;\n"
@@ -1116,7 +1204,12 @@ static void load_config() {
 		config.SetValue("survey", "surveyor", "M. SILTANEN",
 			"; ===== Survey identity (sketch title block + photo caption) =====\n; Surveyor name stamped on sketches and burned into photos.");
 		config.SetValue("survey", "date", "08.08.2016",
-			"; In-world survey date stamped on sketches and photos.");
+			"; In-world survey base date (day 1) stamped on sketches and photos, DD.MM.YYYY.");
+		config.SetBoolValue("survey", "date_auto", true,
+			"; Advance the date/time per map to match INFRA's canon timeline: the game\n"
+			"; starts the morning of the base date and crosses midnight into the next day\n"
+			"; at officeblackout (so the reactor/endings read 09.08.2016). Also drives the\n"
+			"; EXIF time when exif_datetime_auto is on. Off = use the fixed date above.");
 
 		config.SetBoolValue("calculator", "enabled", true,
 			"; ===== N.C.G. field calculator =====\n; Calculator with scientific, programmer (bases/bitwise) and text/cipher\n; (hex<->ASCII, Caesar) modes, plus structural-analyst helpers.");
@@ -1159,6 +1252,126 @@ static void load_config() {
 			"; OFFSET FINDER: dumps probe_count floats from here to silta.log once/sec. Sweep near health (0x210) while moving to spot velocity (changes) or position (big coords). Empty = off.");
 		config.SetLongValue("speedrun", "probe_count", 8,
 			"; How many consecutive floats the probe dumps (1-24).");
+		config.SetValue("camera", "radiation_offset", "0xDE4",
+			"; Player-struct offset (hex/dec) of m_flgeigerRange - the geiger/radiation\n"
+			"; intensity (smaller = closer to a source). 0xDE4 from this build's\n"
+			"; UpdateGeigerCounter. Feeds the (planned) proportional photo grain. 0 = off.");
+		config.SetBoolValue("inventory", "flashlight_subtle_timer", false,
+			"; Show the time-left readout on the SUBTLE gauge skin too (it's hidden there\n"
+			"; by default). Normal flashlight = real battery time; upgraded = the cosmetic\n"
+			"; days countdown. Only affects the subtle skin.");
+		config.SetBoolValue("inventory", "flashlight_debug", false,
+			"; Log the flashlight state ~1/s (even with verbose off): upgraded flag\n"
+			"; @0x18A4, on/off, and whether the charge/battery counters were found. Use\n"
+			"; it to see why the gauge is (not) showing for the upgraded flashlight.");
+		config.SetBoolValue("camera", "photo_radiation_noise", true,
+			"; Add radiation 'grain' (speckle) to photos taken in radiation. Binary: it\n"
+			"; keys off the geiger (m_flgeigerRange), so it works on maps that use it\n"
+			"; (e.g. infra_ee_wasteland). On name-matched maps with no live geiger (the\n"
+			"; reactor) it fires on ~half your shots at random. Radiation maps only.");
+		config.SetDoubleValue("camera", "radiation_noise_strength", 0.5,
+			"; Grain amount, 0 (none) .. 1 (heavy).");
+		config.SetValue("camera", "radiation_noise_color", "rgb",
+			"; Speckle look: 'rgb' = saturated red/green/blue hot pixels with some\n"
+			"; white/cyan/magenta - what a real sensor does under radiation; 'bw' =\n"
+			"; black/white film fog; 'white' = white-only.");
+		config.SetValue("camera", "radiation_noise_pattern", "clusters",
+			"; 'speckle' = single pixels; 'clusters' = some hits bloom into 2x2-ish\n"
+			"; blobs (closest to real sensor damage); 'streaks' = some become short\n"
+			"; 3-6px tracks (cosmic-ray style).");
+		config.SetBoolValue("camera", "radiation_exif_corruption", true,
+			"; Immersion: photos taken in radiation have a chance (scaled by dose) of the\n"
+			"; saved file's METADATA being corrupted - garbled EXIF text, an impossible\n"
+			"; or wiped timestamp, scrambled GPS. The image and file always open fine;\n"
+			"; only the recorded data is damaged, as if the sensor/clock took hits. Very\n"
+			"; rarely (heavy dose) the burned-in date on the photo itself glitches too.");
+		config.SetDoubleValue("camera", "radiation_exif_chance", 1.0,
+			"; Multiplier on the corruption probability (0 = never, 1 = default, >1 more).");
+		config.SetBoolValue("camera", "radiation_noise_over_caption", false,
+			"; Also grain the burned-in caption (radiation doesn't respect the stamp).\n"
+			"; false keeps the caption clean and readable.");
+		config.SetValue("radiation_zones", "zone1", "reactor box -540 -395 -135 710 400 545 0.7 300",
+			"; ============================ RADIATION ZONES ============================\n"
+			"; Hand-placed radiation volumes for maps where the game's geiger can't tell\n"
+			"; SILTA where the radiation is (the reactor reads a flat value). Inside a\n"
+			"; zone, photos get radiation grain (needs photo_radiation_noise = true);\n"
+			"; outside every zone they're clean. Any map that defines at least one zone\n"
+			"; turns OFF the '~random on name-matched maps' fallback - your zones become\n"
+			"; the authority for that map.\n"
+			";\n"
+			"; Add up to 64 zones: keys zone1, zone2, ... zone64. Each is either a\n"
+			"; SPHERE or a BOX, keyed to a map by a fragment of its name.\n"
+			";\n"
+			";   SPHERE:  zoneN = <map> <x> <y> <z> <radius> [strength] [ramp_sec]\n"
+			";   BOX:     zoneN = <map> box <x1> <y1> <z1> <x2> <y2> <z2> [strength] [ramp_sec]\n"
+			";\n"
+			"; Values:\n"
+			";   <map>      part of the map file name, e.g. 'reactor' matches\n"
+			";              infra_c10_m2_reactor. Longest match wins if several apply.\n"
+			";   x y z      world coordinates of the sphere CENTER (Source units).\n"
+			";   radius     sphere radius in units (a big room is ~500-1000).\n"
+			";   x1..z2     the two opposite CORNERS of a box (any order; normalized).\n"
+			";   strength   optional 0..1 grain amount for this zone; overrides the\n"
+			";              global radiation_noise_strength. Omit = use the global.\n"
+			";   ramp_sec   optional. If > 0 the exposure BUILDS over cumulative time\n"
+			";              spent in the zone: ~20% strength on entry, full after this\n"
+			";              many seconds inside (like the game's dose). The clock pauses\n"
+			";              when you leave and resets when the map changes. Omit = instant.\n"
+			";\n"
+			"; Optional companion key, one per zone:\n"
+			";   zoneN_trigger = <x> <y> <z> <radius>\n"
+			";     The zone stays ASLEEP (no grain) until the player first enters this\n"
+			";     small trigger sphere; then it arms for the rest of the map. Use it so\n"
+			";     a room only 'goes hot' after you reach the point where it should.\n"
+			";\n"
+			"; Collecting coordinates: bind [hotkeys] mark_position, stand where you want\n"
+			"; a center/corner, press it - a ZONE-MARK line with map + x y z is written\n"
+			"; to silta.log (and shown on screen). Mark a couple of corners for a box, or\n"
+			"; center + a wall for a sphere radius.\n"
+			";\n"
+			"; Examples:\n"
+			";   zone1 = npp 512 -256 64 700 1.0            ; sphere, full strength\n"
+			";   zone7 = reactor box -540 -395 -135 710 400 545 0.7 300  ; box, ramps 5 min\n"
+			";   zone7_trigger = -136 527 34 120            ; ...but only after you reach here\n"
+			";\n"
+			"; Defaults below are the reactor (turbine hall box that ramps after a trigger,\n"
+			"; + the chamber beneath it) and the bunker (lab / demon core / uranium hangar),\n"
+			"; all surveyed in-game.");
+		config.SetValue("radiation_ambient", "roof", "0.35 0.3",
+			"; =========================== AMBIENT RADIATION ==========================\n"
+			"; A map-wide random radiation baseline, applied everywhere the player is\n"
+			"; NOT standing inside a [radiation_zones] volume. Use it for maps that are\n"
+			"; radioactive all over rather than in one spot.\n"
+			";\n"
+			";   <map_fragment> = <base 0..1> [variance 0..1]\n"
+			";\n"
+			";   <map_fragment>  part of the map name, like the zones above.\n"
+			";   base            center grain amount for every photo on the map.\n"
+			";   variance        optional random swing: each photo picks a value in\n"
+			";                   base +/- variance (clamped 0..1). Omit = steady 'base'.\n"
+			";\n"
+			"; Precedence: inside a zone -> the zone wins; outside -> this ambient value;\n"
+			"; a zone-map with no ambient entry -> clean outside its zones.\n"
+			"; Add any number of maps. Defaults:\n"
+			"; roof - mild, with wide random lows and highs.");
+		config.SetValue("radiation_ambient", "wasteland", "0.8 0.2",
+			"; wasteland: fixed-high with some random.");
+		config.SetValue("radiation_ambient", "bunker", "0.2 0.15",
+			"; bunker: low background everywhere; the lab/hangar/demon-core zones spike it.");
+		config.SetValue("radiation_zones", "zone1_trigger", "-136 527 34 120",
+			"; zone1 sleeps until this small sphere is touched (per map) - the spot where\n"
+			"; the reactor radiation actually starts ramping. Format: x y z radius.");
+		config.SetValue("radiation_zones", "zone2", "reactor 7 -3 -1080 250 1.0",
+			"; The lower reactor chamber (surveyed) - deadlier, full grain immediately.");
+		config.SetValue("radiation_zones", "zone3", "bunker box -7443 -3414 -104 -6820 -2997 52 0.85",
+			"; Bunker LABORATORY (surveyed) - 'above-average radiation', demon core room.");
+		config.SetValue("radiation_zones", "zone4", "bunker -6927 -3295 -43 90 1.0",
+			"; The demon core itself - small, maximum radiation.");
+		config.SetValue("radiation_zones", "zone5", "bunker box -6676 -4437 -435 -6057 -2863 -181 0.8",
+			"; Bunker URANIUM HANGAR (surveyed) - the cylinder storage room.");
+		config.SetBoolValue("camera", "radiation_readout", false,
+			"; [DEBUG] Log the live geiger value ~1/s (even with verbose off) so you can\n"
+			"; confirm it drops near a radiation area. Turn off once verified.");
 		config.SetBoolValue("speedrun", "scan_offsets", false,
 			"; AUTO-FINDER (no Cheat Engine needed). Sweeps the whole player struct and reports likely velocity/position offsets to silta.log every 2s. Turn on, then WALK for a few seconds and STAND STILL a few times; look for 'SCAN vel?' / 'SCAN pos?' lines, copy the offsets into velocity_offset / position_offset, then turn this back off.");
 		config.SetBoolValue("speedrun", "death_toast", false,
@@ -1240,6 +1453,28 @@ static void load_config() {
 			"; When the start map loads fresh, reset the session timer / deaths / pickups\n"
 			"; so a full run measures only that run.");
 
+		config.SetValue("hotkeys", "toggle_menu", "Insert",
+			"; ===== Hotkeys =====\n"
+			"; Show / hide ALL overlays. This is the main key and IS rebindable (it used\n"
+			"; to be locked to Insert). Key format for every hotkey below: a name like\n"
+			"; Insert / Home / End / Space / Delete / PgUp, an F-key like F5, a single\n"
+			"; letter or digit like K or 5, or a raw virtual-key code in hex like 0x2D.\n"
+			"; Leave a key blank to keep its built-in default; set it to 0 to unbind it.");
+		config.SetBoolValue("hotkeys", "bind_wizard_button_menu", true,
+			"; Show the 'SILTA - Bind keys' button on the MAIN MENU. Opens a press-to-\n"
+			"; capture rebinding wizard that records the real key you press - the fix for\n"
+			"; binds not working on non-US keyboard layouts. Saves to silta_binds.ini.");
+		config.SetBoolValue("hotkeys", "bind_wizard_button_ingame", false,
+			"; Also show that button IN-GAME at the pause menu (ESC). Off by default so it\n"
+			"; only appears on the main menu.");
+		config.SetDoubleValue("hotkeys", "bind_wizard_button_x", -1.0,
+			"; Button position on the menu in pixels. -1 = auto (bottom-left, over the\n"
+			"; INFRA version). Set both x and y to place it yourself (top-left origin).");
+		config.SetDoubleValue("hotkeys", "bind_wizard_button_y", -1.0);
+		config.SetValue("hotkeys", "mark_position", "",
+			"; Log the current map + player position (ZONE-MARK line in silta.log) and\n"
+			"; toast it - for collecting coordinates, e.g. to define [radiation_zones].\n"
+			"; Blank = unbound.");
 		config.SetValue("hotkeys", "reload_config", "F6",
 			"; ===== Hotkeys =====\n"
 			"; Keys accept names (F1..F12, INSERT, HOME, A..Z, NUMPAD0..9...), hex\n"
@@ -1306,23 +1541,7 @@ static void load_config() {
 		config.SetValue("tweaks", "bind6_cmd", "");
 
 		config.SaveFile("silta.ini");
-
-		// Append a keyboard reference footer to help users pick hotkey VK codes.
-		std::ofstream foot("silta.ini", std::ios::app);
-		if (foot.is_open()) {
-			foot << "\n"
-				<< "; ============================================================\n"
-				<< "; Hotkeys above use Win32 Virtual-Key codes (decimal).\n"
-				<< "; Full list of codes:\n"
-				<< ";   https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes\n"
-				<< "; Keyboard input overview:\n"
-				<< ";   https://learn.microsoft.com/en-us/windows/win32/inputdev/about-keyboard-input\n"
-				<< "; Quick reference: F1=112 F2=113 F3=114 F4=115 F5=116 F6=117\n"
-				<< ";   F7=118 F8=119 F9=120 F10=121 F11=122 F12=123\n"
-				<< ";   INS=45 DEL=46 HOME=36 END=35 PGUP=33 PGDN=34\n"
-				<< ";   A-Z=65..90  0-9=48..57  SPACE=32  TAB=9  0=disabled\n"
-				<< "; ============================================================\n";
-		}
+		EnsureIniFooter();
 	}
 
 	// ----- Features -----
@@ -1352,7 +1571,7 @@ static void load_config() {
 	// photo_width falls back to the legacy output_width key so old configs keep
 	// their chosen resolution (with height following the aspect, as before).
 	mod::functional_camera::outputWidth = static_cast<int>(config.GetLongValue("camera", "photo_width",
-		config.GetLongValue("camera", "output_width", 660)));
+		config.GetLongValue("camera", "output_width", 640)));
 	mod::functional_camera::outputHeight = static_cast<int>(config.GetLongValue("camera", "photo_height",
 		config.KeyExists("camera", "photo_width") || !config.KeyExists("camera", "output_width") ? 480 : 0));
 	mod::functional_camera::aspectCrop = (ToLower(config.GetValue("camera", "aspect", "crop")) != "stretch");
@@ -1400,6 +1619,12 @@ static void load_config() {
 	overlay::progressSeconds = static_cast<float>(config.GetDoubleValue("counters", "progress_seconds", 5.0));
 
 	// ----- Hotkeys -----
+	overlay::hotkeys.toggleMenu = ParseKeyValue(config.GetValue("hotkeys", "toggle_menu", "Insert"), overlay::hotkeys.toggleMenu);
+	overlay::hotkeys.markPosition = ParseKeyValue(config.GetValue("hotkeys", "mark_position", ""), overlay::hotkeys.markPosition);
+	overlay::bindWizardButtonMenu = config.GetBoolValue("hotkeys", "bind_wizard_button_menu", true);
+	overlay::bindWizardButtonIngame = config.GetBoolValue("hotkeys", "bind_wizard_button_ingame", false);
+	overlay::bindWizardButtonX = static_cast<float>(config.GetDoubleValue("hotkeys", "bind_wizard_button_x", -1.0));
+	overlay::bindWizardButtonY = static_cast<float>(config.GetDoubleValue("hotkeys", "bind_wizard_button_y", -1.0));
 	overlay::hotkeys.reloadConfig = ParseKeyValue(config.GetValue("hotkeys", "reload_config", ""), overlay::hotkeys.reloadConfig);
 	overlay::hotkeys.clearLog = ParseKeyValue(config.GetValue("hotkeys", "clear_log", "0xBF"), 0xBF);
 	overlay::hotkeys.toggleCounters = ParseKeyValue(config.GetValue("hotkeys", "toggle_counters", ""), overlay::hotkeys.toggleCounters);
@@ -1414,6 +1639,35 @@ static void load_config() {
 	overlay::hotkeys.toggleEnding = ParseKeyValue(config.GetValue("hotkeys", "toggle_ending", ""), overlay::hotkeys.toggleEnding);
 	overlay::hotkeys.toggleContact = ParseKeyValue(config.GetValue("hotkeys", "toggle_contact", ""), overlay::hotkeys.toggleContact);
 	overlay::hotkeys.dumpHeld = ParseKeyValue(config.GetValue("hotkeys", "dump_held", ""), overlay::hotkeys.dumpHeld);
+	{
+		// Duplicate-bind check: two actions on one key silently shadow each other
+		// (only the first in the dispatch chain fires), which reads as "my hotkey
+		// doesn't work". Warn loudly so the collision is visible in silta.log.
+		struct NB { const char* name; int vk; };
+		const NB nb[] = {
+			{ "toggle_menu", overlay::hotkeys.toggleMenu }, { "reload_config", overlay::hotkeys.reloadConfig },
+			{ "toggle_counters", overlay::hotkeys.toggleCounters }, { "toggle_inventory", overlay::hotkeys.toggleInventory },
+			{ "cycle_counters_corner", overlay::hotkeys.cycleCountersCorner }, { "cycle_inventory_corner", overlay::hotkeys.cycleInventoryCorner },
+			{ "toggle_lock", overlay::hotkeys.toggleLock }, { "reset_position", overlay::hotkeys.resetPosition },
+			{ "toggle_notes", overlay::hotkeys.toggleNotes }, { "toggle_sketch", overlay::hotkeys.toggleSketch },
+			{ "toggle_calculator", overlay::hotkeys.toggleCalculator }, { "toggle_ending", overlay::hotkeys.toggleEnding },
+			{ "toggle_contact", overlay::hotkeys.toggleContact }, { "clear_log", overlay::hotkeys.clearLog },
+			{ "dump_held", overlay::hotkeys.dumpHeld }, { "mark_position", overlay::hotkeys.markPosition },
+		};
+		const int n = static_cast<int>(sizeof(nb) / sizeof(nb[0]));
+		for (int i = 0; i < n; ++i) {
+			if (nb[i].vk == 0) continue;
+			for (int j = i + 1; j < n; ++j) {
+				if (nb[j].vk == nb[i].vk) {
+					char db[144];
+					sprintf_s(db, sizeof(db), "hotkeys: DUPLICATE BIND 0x%02X used by both '%s' and '%s' - only one will fire",
+						nb[i].vk, nb[i].name, nb[j].name);
+					LogE(db);
+				}
+			}
+		}
+	}
+	overlay::LoadBindsFile(); // press-to-capture binds override [hotkeys]
 
 	// Verbose diagnostic: dump the resolved hotkey codes so a "binds don't work"
 	// report can be checked against what actually parsed. Toggle-menu (Insert by
@@ -1424,7 +1678,7 @@ static void load_config() {
 			"hotkeys resolved: toggle_menu(show/hide all)=0x%02X reload=0x%02X counters=0x%02X "
 			"inventory=0x%02X notes=0x%02X sketch=0x%02X calc=0x%02X ending=0x%02X contact=0x%02X "
 			"lock=0x%02X reset=0x%02X cornerC=0x%02X cornerI=0x%02X clearLog=0x%02X dumpHeld=0x%02X",
-			Base::Data::Keys::ToggleMenu, overlay::hotkeys.reloadConfig, overlay::hotkeys.toggleCounters,
+			overlay::hotkeys.toggleMenu, overlay::hotkeys.reloadConfig, overlay::hotkeys.toggleCounters,
 			overlay::hotkeys.toggleInventory, overlay::hotkeys.toggleNotes, overlay::hotkeys.toggleSketch,
 			overlay::hotkeys.toggleCalculator, overlay::hotkeys.toggleEnding, overlay::hotkeys.toggleContact,
 			overlay::hotkeys.toggleLock, overlay::hotkeys.resetPosition,
@@ -1523,7 +1777,7 @@ static void load_config() {
 		overlay::binoColor[0] = br / 255.0f; overlay::binoColor[1] = bg / 255.0f; overlay::binoColor[2] = bb / 255.0f;
 	}
 	overlay::binoFadeMs = static_cast<int>(config.GetLongValue("binocular", "fade_ms", 120));
-	overlay::binoSound = config.GetBoolValue("binocular", "sound", true);
+	overlay::binoSound = config.GetBoolValue("binocular", "sound", false);
 	overlay::binoSoundDeploy = config.GetValue("binocular", "sound_deploy", "Item.Deploy");
 	overlay::binoSoundHolster = config.GetValue("binocular", "sound_holster", "Item.Holster");
 	overlay::binoPhoneWeaponOffset = static_cast<unsigned int>(strtoul(config.GetValue("binocular", "phone_weapon_offset", "0x890"), nullptr, 0));
@@ -1555,7 +1809,7 @@ static void load_config() {
 	}
 	{
 		g_InvHideTokens.clear();
-		std::string list = config.GetValue("inventory", "hidden_maps", "infra_c1_m1");
+		std::string list = config.GetValue("inventory", "hidden_maps", "");
 		size_t start = 0;
 		while (start <= list.size()) {
 			size_t comma = list.find(',', start);
@@ -1655,6 +1909,8 @@ static void load_config() {
 	overlay::sketchTransparent = config.GetBoolValue("sketch", "transparent", false);
 	overlay::sketchSmooth = config.GetBoolValue("sketch", "smooth", true);
 	overlay::sketchDefaultBrush = static_cast<int>(config.GetLongValue("sketch", "default_brush", 4));
+	overlay::sketchDefaultBrushType = static_cast<int>(config.GetLongValue("sketch", "default_brush_type", 0));
+	if (overlay::sketchDefaultBrushType < 0 || overlay::sketchDefaultBrushType > 7) overlay::sketchDefaultBrushType = 0;
 	overlay::sketchPaper = ParseHexColor(config.GetValue("sketch", "paper_color", ""), overlay::sketchPaper);
 	overlay::sketchToolInk = ParseHexColor(config.GetValue("sketch", "ink_color", ""), overlay::sketchToolInk);
 	overlay::sketchGrid = ParseHexColor(config.GetValue("sketch", "grid_color", ""), overlay::sketchGrid);
@@ -1671,6 +1927,7 @@ static void load_config() {
 	// ----- Survey identity (shared by sketch + camera) -----
 	overlay::surveyorName = config.GetValue("survey", "surveyor", "M. SILTANEN");
 	overlay::surveyDate = config.GetValue("survey", "date", "08.08.2016");
+	overlay::inLoreDateAuto = config.GetBoolValue("survey", "date_auto", true);
 
 	// ----- Field calculator -----
 	overlay::calcEnabled = config.GetBoolValue("calculator", "enabled", true);
@@ -1690,6 +1947,107 @@ static void load_config() {
 	overlay::srPosOffset = static_cast<unsigned int>(strtoul(config.GetValue("speedrun", "position_offset", "0x2C"), nullptr, 0));
 	overlay::srProbeOffset = static_cast<unsigned int>(strtoul(config.GetValue("speedrun", "probe_offset", ""), nullptr, 0));
 	overlay::srProbeCount = static_cast<int>(config.GetLongValue("speedrun", "probe_count", 8));
+	overlay::radiationOffset = static_cast<unsigned int>(strtoul(config.GetValue("camera", "radiation_offset", "0xDE4"), nullptr, 0));
+	overlay::photoRadiationNoise = config.GetBoolValue("camera", "photo_radiation_noise", true);
+	overlay::radiationNoiseStrength = static_cast<float>(config.GetDoubleValue("camera", "radiation_noise_strength", 0.5));
+	{
+		const std::string nc = ToLower(config.GetValue("camera", "radiation_noise_color", "rgb"));
+		mod::functional_camera::radNoiseColor = (nc == "bw") ? 0 : (nc == "white" ? 2 : 1);
+		const std::string np = ToLower(config.GetValue("camera", "radiation_noise_pattern", "clusters"));
+		mod::functional_camera::radNoisePattern = (np == "speckle") ? 0 : (np == "streaks" ? 2 : 1);
+		mod::functional_camera::radNoiseOverCaption = config.GetBoolValue("camera", "radiation_noise_over_caption", false);
+		mod::functional_camera::radExifCorrupt = config.GetBoolValue("camera", "radiation_exif_corruption", true);
+		mod::functional_camera::radExifChance = static_cast<float>(config.GetDoubleValue("camera", "radiation_exif_chance", 1.0));
+	}
+	overlay::radiationReadout = config.GetBoolValue("camera", "radiation_readout", false);
+	overlay::radZones.clear();
+	for (int zi = 1; zi <= 64; ++zi) {
+		char zkey[16];
+		sprintf_s(zkey, sizeof(zkey), "zone%d", zi);
+		std::string zv = config.GetValue("radiation_zones", zkey, "");
+		if (zv.empty()) continue;
+		for (char& c : zv) if (c == ',') c = ' ';
+		char zfrag[64] = { 0 }, zkind[8] = { 0 };
+		overlay::RadZone zn;
+		bool zok = false;
+		if (sscanf_s(zv.c_str(), "%63s %7s", zfrag, static_cast<unsigned>(sizeof(zfrag)), zkind, static_cast<unsigned>(sizeof(zkind))) == 2 &&
+			_stricmp(zkind, "box") == 0) {
+			// Box: <map> box <x1> <y1> <z1> <x2> <y2> <z2> [strength] [ramp_sec]
+			float x1 = 0, y1 = 0, z1 = 0, bx2 = 0, by2 = 0, bz2 = 0, zs = -1.0f, zrs = 0.0f;
+			const int zn_n = sscanf_s(zv.c_str(), "%*s %*s %f %f %f %f %f %f %f %f", &x1, &y1, &z1, &bx2, &by2, &bz2, &zs, &zrs);
+			if (zn_n >= 6) {
+				zn.isBox = true; zn.mapFrag = zfrag;
+				zn.x = (x1 < bx2) ? x1 : bx2;  zn.x2 = (x1 < bx2) ? bx2 : x1;
+				zn.y = (y1 < by2) ? y1 : by2;  zn.y2 = (y1 < by2) ? by2 : y1;
+				zn.z = (z1 < bz2) ? z1 : bz2;  zn.z2 = (z1 < bz2) ? bz2 : z1;
+				zn.strength = (zn_n >= 7) ? zs : -1.0f;
+				zn.rampSec = (zn_n >= 8) ? zrs : 0.0f;
+				zok = true;
+			}
+		} else {
+			// Sphere: <map> <x> <y> <z> <radius> [strength] [ramp_sec]
+			float zx = 0, zy = 0, zz = 0, zr = 0, zs = -1.0f, zrs = 0.0f;
+			const int zn_n = sscanf_s(zv.c_str(), "%63s %f %f %f %f %f %f", zfrag, static_cast<unsigned>(sizeof(zfrag)), &zx, &zy, &zz, &zr, &zs, &zrs);
+			if (zn_n >= 5 && zr > 0.0f) {
+				zn.mapFrag = zfrag; zn.x = zx; zn.y = zy; zn.z = zz; zn.r = zr;
+				zn.strength = (zn_n >= 6) ? zs : -1.0f;
+				zn.rampSec = (zn_n >= 7) ? zrs : 0.0f;
+				zok = true;
+			}
+		}
+		if (zok) {
+			// Optional companion trigger: zoneN_trigger = <x> <y> <z> <radius>. The
+			// zone stays inert until the player touches this sphere (per map).
+			char tkey[24];
+			sprintf_s(tkey, sizeof(tkey), "zone%d_trigger", zi);
+			std::string tv = config.GetValue("radiation_zones", tkey, "");
+			if (!tv.empty()) {
+				for (char& c : tv) if (c == ',') c = ' ';
+				float ttx = 0, tty = 0, ttz = 0, ttr = 0;
+				if (sscanf_s(tv.c_str(), "%f %f %f %f", &ttx, &tty, &ttz, &ttr) == 4 && ttr > 0.0f) {
+					zn.hasTrigger = true; zn.tx = ttx; zn.ty = tty; zn.tz = ttz; zn.tr = ttr;
+				} else {
+					LogE(std::string("radiation_zones: bad ") + tkey + " (want: x y z radius)");
+				}
+			}
+			overlay::radZones.push_back(zn);
+		} else {
+			LogE(std::string("radiation_zones: bad ") + zkey + " (sphere: map x y z r | box: map box x1 y1 z1 x2 y2 z2)");
+		}
+	}
+	if (!overlay::radZones.empty()) {
+		char zc[64];
+		sprintf_s(zc, sizeof(zc), "radiation_zones: %d zone(s) loaded", static_cast<int>(overlay::radZones.size()));
+		LogI(zc);
+	}
+	// [radiation_ambient]: <map_fragment> = <base 0..1> [variance 0..1]. Any key in
+	// the section is a map fragment; the whole section is enumerated so users can
+	// add their own maps freely.
+	overlay::radAmbients.clear();
+	{
+		CSimpleIniA::TNamesDepend keys;
+		config.GetAllKeys("radiation_ambient", keys);
+		for (CSimpleIniA::TNamesDepend::const_iterator it = keys.begin(); it != keys.end(); ++it) {
+			std::string av = config.GetValue("radiation_ambient", it->pItem, "");
+			if (av.empty()) continue;
+			for (char& c : av) if (c == ',') c = ' ';
+			float base = 0.0f, var = 0.0f;
+			const int nn = sscanf_s(av.c_str(), "%f %f", &base, &var);
+			if (nn >= 1 && base >= 0.0f) {
+				overlay::RadAmbient a; a.mapFrag = it->pItem; a.base = base; a.variance = (nn >= 2) ? var : 0.0f;
+				overlay::radAmbients.push_back(a);
+			} else {
+				LogE(std::string("radiation_ambient: bad '") + it->pItem + "' (want: base [variance])");
+			}
+		}
+		if (!overlay::radAmbients.empty()) {
+			char ac[64];
+			sprintf_s(ac, sizeof(ac), "radiation_ambient: %d map(s) loaded", static_cast<int>(overlay::radAmbients.size()));
+			LogI(ac);
+		}
+	}
+	overlay::flashSubtleTimer = config.GetBoolValue("inventory", "flashlight_subtle_timer", false);
+	overlay::flashlightDebug = config.GetBoolValue("inventory", "flashlight_debug", false);
 	overlay::srScanOffsets = config.GetBoolValue("speedrun", "scan_offsets", false);
 	overlay::ResetOffsetScan(); // fresh min/max tracking each reload
 	overlay::srDeathToast = config.GetBoolValue("speedrun", "death_toast", false);
@@ -1786,6 +2144,11 @@ static void load_config() {
 		mod::functional_camera::burnText[1] = static_cast<unsigned char>(tc.y * 255.0f);
 		mod::functional_camera::burnText[2] = static_cast<unsigned char>(tc.z * 255.0f);
 		mod::functional_camera::burnBandAlpha = static_cast<float>(config.GetDoubleValue("camera", "burn_in_band", 0.35));
+	{
+		const std::string bs = ToLower(config.GetValue("camera", "burn_in_style", "band"));
+		mod::functional_camera::burnStyle = (bs == "minimal") ? 2 : (bs == "plain" ? 1 : 0);
+		mod::functional_camera::burnTop = config.GetBoolValue("camera", "burn_in_top", false);
+	}
 	}
 	mod::functional_camera::subfolders = config.GetBoolValue("camera", "subfolders", true);
 	mod::functional_camera::surveyLog = config.GetBoolValue("camera", "survey_log", true);
@@ -1946,7 +2309,7 @@ static void DoGenerateSurveyReport(const char* map_name) {
 		fprintf(f, "N.C.G. STRUCTURAL SURVEY - FIELD REPORT\r\n");
 		fprintf(f, "=======================================\r\n");
 		fprintf(f, "Surveyor : %s\r\n", overlay::surveyorName.c_str());
-		fprintf(f, "Date     : %s\r\n", overlay::surveyDate.c_str());
+		fprintf(f, "Date     : %s\r\n", overlay::InLoreSurveyDate().c_str());
 		fprintf(f, "Site     : %s\r\n", site.c_str());
 		fprintf(f, "Map      : %s\r\n\r\n", map_name);
 		fprintf(f, "Run type : %s\r\n", overlay::runFromStart
@@ -2200,6 +2563,7 @@ HRESULT __stdcall EndScene(const LPDIRECT3DDEVICE9 pDevice) {
 	// Drain any keys captured by the experimental low-level keyboard hook.
 	if (g_UseLowLevelHook) DrainLowLevelKeys();
 	overlay::TickSpeedrun();
+	overlay::TickRadiation();
 
 	// *** DEBUG ONLY *** force the end-of-game report via the [report]
 	// debug_trigger key. Serviced here (per frame) so it fires immediately, not

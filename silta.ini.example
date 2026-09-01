@@ -29,593 +29,112 @@ counters_corner = bottom-right
 inventory_corner = top-left
 ; native = squared/bordered HUD style; debug = plain ImGui look.
 theme = native
-; Show a hotkey tip bar at the top when the cursor is out (phone/menu).
-hotkey_tips = true
-; Fade the tip bar out after tip_fade_seconds (off = stays while cursor is out).
-tip_fade = true
-; Seconds the tip bar stays before fading (when tip_fade = true).
-tip_fade_seconds = 8
-; Remember dragged overlay/notes/sketch window positions across game restarts.
-save_layout = true
-; Counters/inventory window border as R,G,B,A (0-255 each). Empty = theme
-; default. Examples: 255,140,0,255 (orange) - ,,,0 (alpha only: no border).
-border_color =
-; Auto-close edit mode (unlock via F11) after this many seconds without
-; dragging, so you can't get stuck in placement mode. Blank or 0 = never.
-edit_autoclose = 10
-; Re-snap the counters and inventory to their corners on every map load,
-; re-measured at their current size (they auto-adjust as values change).
-auto_align = false
-; ===== Focus fade (immersion) =====
-; When on, the counters overlay rests nearly transparent and "wakes up" to full
-; visibility for a few seconds whenever a tally changes (a successful photo, a
-; repair...) or the mouse hovers it, then sinks back.
-focus_fade_counters = false
-; Same for the inventory overlay (wakes on battery/coin pickups).
-focus_fade_inventory = false
-; Idle transparency percent while resting (90 = faint ghost, 0 = opaque).
-focus_transparency = 90
-; How long the overlay stays fully visible after an event.
-focus_seconds = 2.5
-; Fade in/out time (seconds) between resting and visible.
-focus_ramp = 0.35
-; Colour palette preset: default | osmo (amber) | ncg (navy) | corruption (red)
-palette = default
-; Title counters with the real location name (e.g. Bergmann Tunnels)
-location_names = true
-
-; ===== Camera photos =====
-; Saved photo resolution. Default 660x480 = the IMAGE-IN Crystal-shot's in-lore
-; 480p. Presets you might want:
-;   660  x 480   Crystal-shot 480p (lore-accurate, default)
-;   1280 x 720   720p
-;   1920 x 1080  1080p
-;   0    x 0     native capture (full engine resolution)
-; photo_height 0 with a width set = height follows the game aspect.
-[camera]
-photo_width = 660
-photo_height = 480
-; When the target aspect differs from the capture: crop (a real camera crops its
-; sensor - centered window, default) or stretch (distorts).
-aspect = crop
-; EXIF camera identity written into every JPEG (the in-lore camera is the
-; IMAGE-IN Crystal-shot). Change to anything you like.
-exif_make = IMAGE-IN
-exif_model = Crystal-shot
-; EXIF Software tag. Empty = "SILTA v<version>" automatically.
-exif_software =
-; jpg (smaller files) or png (lossless).
-format = jpg
-; Scaling filter when resizing: linear (smoother) or point (sharp).
-upscale_filter = linear
-; Photo file names: camera (DSC00001.jpg, digital-camera style) or timestamp.
-naming = camera
-; Show a brief 'IMAGE-IN - DSC#####.jpg' toast when a photo is saved
-save_toast = true
-; Seconds the save toast stays (0 = disable)
-toast_seconds = 0.5
-; Cosmetic text before the photo name in the toast
-toast_label = saved to microSD\DCIM\
-; Stamp a visible N.C.G. survey caption (location, date, surveyor) onto the photo.
-burn_in = true
-; Embed EXIF metadata (make/model, date, location) into JPEG photos.
-exif = true
-; EXIF capture timestamp, format YYYY:MM:DD HH:MM:SS. The date is also the base
-; date used when exif_datetime_auto is on.
-exif_datetime = 2016:08:08 12:00:00
-; Approximate the photo time-of-day from the map's chapter (c1 ~08:00 .. c10
-; ~23:00), plus ~20 min per mission within the chapter. Deliberately NOT tied to
-; real play time, so a slow playthrough still matches the canon one-day timeline.
-; Set false to use the fixed exif_datetime instead.
-exif_datetime_auto = true
-; --- Real coordinates in EXIF ---
-; Coordinates work out of the box (origin offset built in). The keys below are
-; recovery tools for a hypothetical future game patch only.
-; *** DEBUG ONLY *** If a patch ever moves the origin: console (developer 1),
-; getpos, paste the three numbers after 'setpos' below (trailing ;setang is
-; harmless), press F6 and stand still ~1 s - SILTA locks the new offset
-; (toast + log), e.g.
-;   calibrate = 2890.121094 -5455.071289 -3361.273193
-calibrate =
-; *** DEBUG ONLY *** Player-origin source for EXIF coordinates. Leave at 0 =
-; built-in (offset 0x2C - works on the current game build); positive byte
-; offset = override after a game patch (re-run calibrate to find it);
-; -1 = disable coordinates entirely.
-player_origin_offset = 0
-; Map coordinates to EXIF GPS tags. Cosmetic mapping: the world origin anchors
-; where Stolland canonically sits - the open Baltic Sea between Sweden (NE) and
-; Denmark (S), per stalburg.net/Stolland - so viewers drop your survey pins on
-; Stolland's waters.
-exif_gps = true
-gps_lat0 = 57.0
-gps_lon0 = 19.0
-gps_units_per_degree = 100000.0
-; --- Visible burn-in caption styling ---
-; Top line (N.C.G. SURVEY <location>) and bottom line (photo / date / surveyor).
-burn_in_accent_color = FFEB96
-burn_in_text_color = E6E6E6
-; Caption band darkness: 0 = solid black strip, 1 = no strip (text only).
-burn_in_band = 0.35
-; Sort photos into per-site subfolders, e.g. DCIM\HammerValleyReservoir\.
-subfolders = true
-; Append every photo (file, site, time, coords) to DCIM\survey_log.txt.
-survey_log = true
-; Include an N.C.G. asset tag (site + filename) in the EXIF description.
-asset_tag = true
-
-; ===== End-of-game survey report =====
-; On reaching an ending map, write NCG_Survey_Report.txt to the game folder and
-; show a themed in-game popup with the verdict.
-[report]
-enabled = true
-; Comma-separated map-name fragments that count as "the end"; the report fires
-; when the current map name contains any of them.
-ending_maps = infra_c11_ending_1,infra_c11_ending_2,infra_c11_ending_3
-; How long the report popup stays on screen.
-popup_seconds = 12.0
-; *** DEBUG ONLY *** Press this key to force the end-of-game report (file + popup)
-; from the current counters, for testing. Empty = disabled. Names/hex/decimal,
-; e.g. X.
-debug_trigger =
-; Add "Reading M:SS" to the report - total wall time spent with a document open.
-show_reading = true
-; Add "Pickups N" + "Favorite <name> xM" to the report.
-show_pickups = true
-; The map that counts as "the beginning". A run starting here plants a marker in
-; the SAVE, so the report stays valid across save/load and multiple sittings; a
-; chapter-select / mid-game start is stamped PARTIAL.
-start_map = infra_c1_m1_office
-; When the start map loads fresh, reset the session timer / deaths / pickups.
-reset_on_start = true
-
-; ===== Per-category counter rows =====
-; *_color: hex RRGGBB for that row.  *_show: false hides that row.
-[counters]
-defects_color = E0E0E0
-defects_show = true
-corruption_color = FF6E6E
-corruption_show = true
-repairs_color = 6ED1FF
-repairs_show = true
-geocaches_color = FFD96E
-geocaches_show = true
-flowmeters_color = B58CFF
-flowmeters_show = true
-; How a finished category is shown: color | check | dim
-complete_style = color
-; Show an overall completion line (Total: cur / max (pct%)).
-show_total = true
-; Use the game's own wording for the rows (Photo spots / Corruption docs / etc.)
-canon_labels = false
-; Brief progress popup (per-category %, next achievement) when the cursor is out
-show_progress = true
-progress_seconds = 5
-
-; ===== Battery overlay colours (hex RRGGBB) + icons =====
-[inventory]
-flashlight_color = FFE08A
-camera_color = 8AD0FF
-oscoins_color = FFD96E
-; Small battery glyph by the flashlight/camera lines.
-battery_icons = true
-; Show what you're holding with E (the held object's name), read from the
-; player's networked heldObject field.
-show_held = false
-; Show a "Flashlight: upgraded" line once you have the flashlight upgrade.
-show_flashlight_upgrade = false
-; Novelty tally: counts each object you pick up (hold with E) whose name
-; contains this text, case-insensitive. e.g. osmo -> counts beers. Empty = off.
-pickup_watch =
-; Label shown before the pickup tally, e.g. "Osmo olut".
-pickup_label = Picked up
-
-; ===== Binocular zoom overlay =====
-; Coin glyph by OS Coins (appears once you have at least 1).
-coin_icon = true
-; Digital battery gauge near the bottom of the screen. Without a charge offset
-; (below) it can only show the battery COUNT, appearing briefly when it changes.
-; With the offset set it tracks the real charge live while the flashlight drains.
-flashlight_gauge = true
-; *** DEBUG ONLY *** LIVE flashlight charge source. Leave at 0 = built-in
-; (offset 0x184C, percent of the current battery - works on the current game
-; build). Positive byte offset = override if a future game patch moves the
-; struct (re-run charge_autoscan to find it); -1 = disable the live gauge
-; (falls back to battery count).
-flashlight_charge_offset = 0
-; Full-gauge value. 0 = auto (1000 with charge offset, 10 for count).
-flashlight_gauge_max = 0
-; *** DEBUG ONLY *** - normally NOT needed (the charge offset is built in).
-; If a game patch ever moves it: turn this on, flashlight ON ~15 s, SILTA finds
-; the new offset (toast + silta.log); put it in flashlight_charge_offset above,
-; turn this back off.
-charge_autoscan = false
-; How long the gauge lingers after the last charge drop. The flashlight drains
-; 1 unit every ~2 s, so values under ~2.5 make the gauge blink between ticks
-; instead of staying up.
-flashlight_gauge_seconds = 3.0
-; Smooth fade-out duration (seconds) at the end of the linger.
-flashlight_gauge_fade = 0.4
-; Show the % text (and the spare-battery count) on the gauge.
-flashlight_gauge_numbers = false
-; Cosmetic "battery days remaining" under the gauge - only after you get the
-; Cosmetic 'days remaining' for the UPGRADED (infinite) flashlight - flavour that
-; counts down slowly with flashlight-on time. 0 = off. The NORMAL flashlight
-; instead shows its real time-to-empty (estimated live). Both appear only on the
-; 'default' or 'custom' gauge skin - the 'subtle' default stays clean.
-upgraded_days = 60
-; Gauge skin: default (instrument panel), subtle (slim transparent bar), or
-; custom (panel layout with the colors below).
-flashlight_gauge_skin = subtle
-; Gauge screen position (top-left corner, pixels). -1 -1 = automatic
-; bottom-center. Easiest: unlock overlays (F11) and drag the gauge with the
-; mouse - the position saves here automatically.
-gauge_x = -1
-gauge_y = -1
-; Custom gauge colors (hex RRGGBB), used when flashlight_gauge_skin = custom.
-gauge_custom_bg = 0C0E12
-gauge_custom_frame = 46546E
-gauge_custom_label = 96AAC8
-gauge_custom_fill_high = 78DC78
-gauge_custom_fill_mid = EBC85A
-gauge_custom_fill_low = EB5A50
-; Comma-separated map-name fragments where the inventory overlay is hidden
-; entirely (maps that never use it - the office prologue has no flashlight or
-; camera). Add more fragments if other maps follow the same logic.
-hidden_maps = infra_c1_m1
-
-; ===== Notes scratchpad =====
-; A resizable/movable window to jot puzzle/secret/ARG notes; text is saved to
-; silta_notes.txt. Toggle with the notes hotkey.
-
-[binocular]
-; Two-circle "binocular" viewport drawn over the game. Press the zoom key to
-; toggle it on/off (default middle mouse, like INFRA/Portal 2).
-enabled = true
-; Activation key (vk hex/dec). 0x04 = middle mouse.
-key = 0x04
-; true = press to toggle on/off (holding has no effect), false = hold to look.
-toggle = true
-; Hide the scope while the phone/call is out (also fixes the ESC state-flip).
-; Covers a live call always; for the phone WEAPON merely being equipped, also
-; set phone_weapon_offset below.
-hide_on_phone = true
-; Hide the scope while the flashlight is ON. Default OFF - INFRA's flashlight is
-; on most of the time, so ON would suppress the scope almost always.
-hide_on_flashlight = false
-; OPTIONAL player offset (hex/dec) of a "camera is out" flag; non-zero hides the
-; scope. Empty = disabled (no verified offset yet - find one in Cheat Engine).
-camera_offset =
-; 0-255 darkness outside the circles (255 = solid black).
-opacity = 255
-; Edge feather in pixels.
-softness = 24
-; Circle radius as a fraction of screen height.
-radius = 0.46
-; Half-distance between the eyes as a fraction of screen width.
-separation = 0.13
-; Mask colour R,G,B (0-255).
-color = 0,0,0
-; Fade in/out duration (ms).
-fade_ms = 120
-; Play the phone deploy/holster jacket sound on zoom in/out.
-sound = true
-sound_deploy = Item.Deploy
-sound_holster = Item.Holster
-; EHANDLE offset (hex/dec) of the active weapon. When it resolves to phone_class
-; the scope hides (covers the phone weapon being equipped, which a live-call
-; check misses). Find it with [speedrun] scan_offsets while the phone is out:
-; look for "SCAN handle @0x... -> class=infra_phone". Empty = off.
-phone_weapon_offset = 0x890
-; Classname that counts as "phone out" for phone_weapon_offset.
-phone_class = infra_phone
-; EXPERIMENTAL, disabled - INFRA doesn't route its zoom through m_iFOV on the
-; tested build, so this does nothing useful. Leave false; the scope is driven by
-; the key toggle below.
-fov_gate = false
-; Player-struct offset (hex/dec) of m_iFOV (int). 0xC10 on this build.
-fov_offset = 0xC10
-; FOV at or below which counts as "zoomed" (scope shown).
-fov_zoom_max = 60
-
-[notes]
-enabled = true
-text_color = EBEBDC
-; Notes skin: ncg (memo) | pad (yellow pad) | plain | geolog (geocache log) |
-; custom (colors below)
-skin = ncg
-; Custom-skin colors (hex RRGGBB / RRGGBBAA), used when skin = custom.
-; rule/margin with alpha 00 = no ruled lines / no margin line.
-custom_paper = F5F5ED
-custom_ink = 1A1F33
-custom_rule = 7896CC00
-custom_margin = D25A5A00
-; Auto-open the notes window whenever the cursor is out (phone/menu).
-open_with_phone = false
-; Text size multiplier for the notes window (1.0 = default).
-font_scale = 1.0
-
-; ===== Sketchbook (NCG survey sketch sheet) =====
-; A paintable canvas; export saved to sketches\NCG_SURVEY_#####.png.
-[sketch]
-enabled = true
-; Square canvas resolution in pixels (used when width/height are 0).
-size = 1000
-; Rectangular page: set BOTH width and height (0 = use 'size'). The canvas keeps
-; this exact shape in-game - you can only resize/enlarge the window (it letterboxes),
-; never distort the page.
-width = 0
-height = 0
-; Faint survey grid + N.C.G. title block on the page.
-survey_sheet = true
-; Transparent page so you can trace over the in-game scenery.
-transparent = false
-; Canvas display: false = crisp (point), true = smooth (bilinear)
-smooth = true
-; Starting brush size (1-40) and ink colour (hex RRGGBB).
-default_brush = 4
-; Sketchbook colors (hex RRGGBB, or RRGGBBAA where alpha matters): paper (window
-; background), toolbar ink, survey grid (alpha supported), and the N.C.G.
-; letterhead/rule/title block. Grid/letterhead apply on the next Clear.
-paper_color = F7F5EB
-ink_color = 141A29
-grid_color = 6E7D966E
-letterhead_color = 141E4B
-default_ink = 1A1F66
-
-; ===== Survey identity (sketch title block + photo caption) =====
-[survey]
-surveyor = M. SILTANEN
-date = 08.08.2016
-
-; ===== N.C.G. field calculator =====
-; Calculator with scientific, programmer (bases/bitwise) and text/cipher
-; (hex<->ASCII, Caesar) modes, plus structural-analyst helpers. Toggle with the
-; calculator hotkey; switch modes with the buttons along the top.
-[calculator]
-enabled = true
-; Startup mode: basic | scientific | programmer | text
-mode = basic
-; Skin: ncg (default instrument), osmo (Osmo Olut beer theme), or custom
-; (colors below - easiest edited via the calculator's in-game Style tab,
-; which has a 'Save to silta.ini' button).
-skin = ncg
-; Custom-skin colors (hex RRGGBB), used when skin = custom.
-custom_window = 1C1F21
-custom_button = 333840
-custom_button_hover = 4D545E
-custom_button_active = 66571F
-custom_accent = 8C9EBF
-custom_display = FFBD33
-custom_display_bg = 0D0F0D
-
-; ===== N.C.G. study outlook (ending predictor) =====
-; Panel mapping your photo/corruption tallies onto the game's ending thresholds.
-[ending]
-enabled = true
-
-; ===== Photo contact sheet =====
-; Thumbnail grid of this session's photos with a click-to-isolate zoom view.
-[contact_sheet]
-enabled = true
-
-; ===== Hotkeys (Win32 virtual-key codes; 0 = disabled) =====
-; F1=0x70 F6=0x75 F7=0x76 F8=0x77 F9=0x78 F10=0x79 F11=0x7A F12=0x7B. INS toggles all.
-; Keys accept names (F1..F12, INSERT, HOME, A..Z, NUMPAD0..9...), hex (0x74)
-; or decimal virtual-key codes (116).
-; Photo order: name | date_new (newest first) | date_old. Pinned first.
-sort = name
-
-[hotkeys]
-; Reload this ini live (colors/corners/sizes) without restarting.
-reload_config = F6
-; Clear silta.log (debug). Default 0xBF = the / key.
-clear_log = 0xBF
-; Show/hide the counters overlay.
-toggle_counters = F7
-; Show/hide the battery overlay.
-toggle_inventory = F8
-; Move counters to the next screen corner.
-cycle_counters_corner = F9
-; Move inventory to the next screen corner.
-cycle_inventory_corner = F10
-; Unlock to drag overlays with the mouse; lock snaps them back.
-toggle_lock = F11
-; Snap both overlays back to their configured corners.
-reset_position = F12
-; Show/hide the notes scratchpad.
-toggle_notes = F4
-; Show/hide the NCG sketchbook.
-toggle_sketch = F3
-; Show/hide the field calculator (basic / scientific / programmer / text-cipher).
-toggle_calculator = F2
-; Show/hide the study-outlook (ending predictor) panel.
-toggle_ending = F1
-; Show/hide the photo contact sheet.
-toggle_contact = F5
-; Log the FULL identity of the object you're holding (class + targetname + model +
-; handle) to silta.log, plus a toast. Grab a prop with E, press this, then copy a
-; distinctive token into [pickup_names]. Empty = disabled. 0x24 = Home.
-dump_held =
-; Hotkey tip bar styling (hex RRGGBB). Empty = follow the overlay theme colors
-; (complete_color for keys, text_color for descriptions).
-key_color =
-text_color =
-; *** EXPERIMENTAL *** Input fallback. If hotkeys do nothing on a machine (verbose
-; silta.log shows NO "hotkey: keydown" lines), the window isn't delivering key
-; messages to the overlay; set true to poll the keys each frame instead (only
-; while the game window is focused). Set [log] verbose = true to see
-; "hotkey: poll fired" lines confirming it works.
-use_polling = false
-; *** EXPERIMENTAL *** Strongest input fallback: a system-wide low-level keyboard
-; hook (WH_KEYBOARD_LL) catching keys at the OS level, before the game, regardless
-; of window messages / raw input / fullscreen. Use if BOTH normal hotkeys and
-; use_polling do nothing. Verbose logs "lowlevel: key vk=.." for every key.
-; Single-player only; a global keyboard hook may trip anti-cheat elsewhere.
-low_level_hook = false
-
-; ===== Engine tweaks (ADVANCED, off by default) =====
-; Runs console commands on each map load via IVEngineClient.
-; engine_interface: blank = auto-try common versions, or set one explicitly.
-; clientcmd_index: IVEngineClient::ClientCmd vtable slot - VERIFY before enabling;
-; a wrong index can crash. Any OTHER key here is a command to run, e.g.:
-;   captions = closecaption 1
-[tweaks]
-enabled = false
-engine_interface =
-clientcmd_index = 7
-; *** DEBUG ONLY *** Key -> console-command binds. Press the key in-game to run
-; the command (works during normal play, no need to open the overlay). Keys
-; accept names/hex/decimal like [hotkeys]. All empty by default; requires
-; enabled = true above. Examples:
-;   bind1_key = 0     bind1_cmd = ent_fire !picker unlock
-;   bind2_key = 9     bind2_cmd = ent_fire !picker lock
-;   bind3_key = HOME  bind3_cmd = incrementvar mat_postprocess_enable 0 1 1
-;   bind4_key = END   bind4_cmd = incrementvar developer 0 1 1
-bind1_key =
-bind1_cmd =
-bind2_key =
-bind2_cmd =
-bind3_key =
-bind3_cmd =
-bind4_key =
-bind4_cmd =
-bind5_key =
-bind5_cmd =
-bind6_key =
-bind6_cmd =
-
-; ============================================================
-; Hotkeys above use Win32 Virtual-Key codes (decimal).
-; Full list of codes:
-;   https://learn.microsoft.com/en-us/windows/win32/inputdev/virtual-key-codes
-; Keyboard input overview:
-;   https://learn.microsoft.com/en-us/windows/win32/inputdev/about-keyboard-input
-; Quick reference: F1=112 F2=113 F3=114 F4=115 F5=116 F6=117
-;   F7=118 F8=119 F9=120 F10=121 F11=122 F12=123
-;   INS=45 DEL=46 HOME=36 END=35 PGUP=33 PGDN=34
-;   A-Z=65..90  0-9=48..57  SPACE=32  TAB=9  0=disabled
-; ============================================================
-
-; ===== Logging =====
-; Verbose silta.log: timestamps every line, flushes immediately (a crash leaves
-; the last action in the log), and adds debug breadcrumbs. Turn on when hunting
-; a bug or filing a report.
-[log]
-verbose = false
-
-; ===== Version watermark =====
-; Small white "SILTA v1.0" tag, shown ONLY in the main menu.
-[watermark]
-enabled = true
-; Corner: 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right.
-corner = 3
-; Main-menu watermark text. Empty = "SILTA v<version>" automatically; set any
-; string to override it.
-text =
-
-; ===== Experimental (obsolete) =====
-; Attempts at fixing specific edge cases that did NOT pan out in testing. Kept
-; for reference only - leave them all false; none is a real fix.
+; Show the 'SILTA - Bind keys' button on the MAIN MENU (press-to-capture rebinder
+; that records the real key you press - fixes binds on non-US layouts).
+bind_wizard_button_menu = true
+; Also show it IN-GAME at the pause menu (ESC). Off by default.
+bind_wizard_button_ingame = false
+; Button position (px, top-left origin). -1 = auto (bottom-left, over the version).
+bind_wizard_button_x = -1
+bind_wizard_button_y = -1
+toggle_menu = Insert
+; Log current map + player position (ZONE-MARK line + toast) - for collecting
+; coordinates, e.g. to define [radiation_zones]
+; ============================ RADIATION ZONES ============================
+; Hand-placed radiation volumes for maps where the game's geiger can't tell SILTA
+; where the radiation is. Inside a zone, photos get radiation grain (needs
+; photo_radiation_noise = true); outside every zone they're clean. Any map with at
+; least one zone turns OFF the '~random on name-matched maps' fallback for it.
 ;
-; backbuffer_capture: capture photos from the back buffer instead of the game's
-;   freeze-frame texture. Saves after a save-load, but captures the composited
-;   screen (camera model/hand visible) - NOT the clean photo.
-; force_backbuffer_render: draw the overlay onto the real back buffer. Aimed to
-;   keep the overlay visible with post-processing off; did not fix it.
-; present_render: draw the overlay in Present() instead of EndScene(). Same goal
-;   as above; also did not fix the post-processing case.
-[experimental]
-backbuffer_capture = false
-force_backbuffer_render = false
-present_render = false
-; *** EXPERIMENTAL / READ-ONLY debug *** Log a value at engine.dll+offset on every
-; photo (verbose log only), for RE of the load-counter <-> failure correlation.
-; Never writes; out-of-range offset just logs. The offset is build-specific and
-; means nothing on another INFRA version - a probe, not a fix.
-engine_counter_probe = false
-; Hex offset into engine.dll for the probe, e.g. 0x120D91. Empty = off.
-engine_counter_offset =
+; Up to 64 zones (zone1..zone64), each a SPHERE or a BOX keyed to a map fragment:
+;   SPHERE: zoneN = <map> <x> <y> <z> <radius> [strength] [ramp_sec]
+;   BOX:    zoneN = <map> box <x1> <y1> <z1> <x2> <y2> <z2> [strength] [ramp_sec]
+;
+;   map       part of the map name (e.g. 'reactor' matches infra_c10_m2_reactor)
+;   x y z     sphere CENTER, world units (a big room is ~500-1000 across)
+;   radius    sphere radius in units
+;   x1..z2    two opposite box CORNERS (any order)
+;   strength  optional 0..1 grain for this zone; overrides radiation_noise_strength
+;   ramp_sec  optional; if > 0 exposure BUILDS over cumulative in-zone time (~20%
+;             on entry, full after this many seconds; pauses when you leave, resets
+;             per map). Omit = instant.
+;
+; Optional companion, one per zone:
+;   zoneN_trigger = <x> <y> <z> <radius>
+;     Zone stays ASLEEP until the player first touches this sphere, then arms for
+;     the rest of the map.
+;
+; Collect coordinates in-game: bind [hotkeys] mark_position, stand on the spot,
+; press it -> a ZONE-MARK line (map + x y z) goes to silta.log. Mark box corners,
+; or a center + a wall for a sphere radius.
+;
+; Defaults below: reactor (turbine hall box, wakes at a trigger then ramps ~5 min;
+; + the chamber beneath it) and bunker (lab / demon core / uranium hangar).
+zone1 = reactor box -540 -395 -135 710 400 545 0.7 300
+zone1_trigger = -136 527 34 120
+zone2 = reactor 7 -3 -1080 250 1.0
+; Bunker laboratory (demon core room), the demon core itself, and the uranium
+; hangar - all surveyed in-game.
+zone3 = bunker box -7443 -3414 -104 -6820 -2997 52 0.85
+zone4 = bunker -6927 -3295 -43 90 1.0
+zone5 = bunker box -6676 -4437 -435 -6057 -2863 -181 0.8
 
-; ===== Speedrun timer / death counter =====
-[speedrun]
-; On-screen run timer (accumulates during gameplay, pauses in menus).
-show_timer = false
-; Count deaths (needs health_offset).
-count_deaths = false
-; Horizontal speed in Hammer units/sec, themed like the overlay (a styled
-; cl_showpos). Needs velocity_offset set to read an actual number.
-show_velocity = false
-; Player-struct offset (hex/dec) of m_vecVelocity (3 floats). Empty = off. No
-; 0x168 was found via scan_offsets on this INFRA build (0 standing, ground speed
-; when moving); the value self-logs so you can confirm. Empty/0 = off.
-velocity_offset = 0x168
-; Draw player position X Y Z (like cl_showpos). Needs position_offset.
-show_position = false
-; Label the position readout as 'X: Y: Z:' instead of three bare numbers.
-position_axis = false
-; Player-struct offset (hex/dec) of m_vecOrigin (3 floats). Empty = off.
-position_offset = 0x2C
-; OFFSET FINDER: dumps probe_count floats from here to silta.log once/sec. Sweep
-; near health (0x210) while moving to spot velocity (changes) or position (big
-; coords). Empty = off.
-probe_offset =
-; How many consecutive floats the probe dumps (1-24).
-probe_count = 8
-; AUTO-FINDER (no Cheat Engine needed). Sweeps the whole player struct and
-; reports likely velocity/position offsets to silta.log every 2s. Turn on, WALK
-; a few seconds, STAND STILL, repeat 2-3 times; then look for "SCAN vel?" /
-; "SCAN pos?" lines, copy those offsets into velocity_offset / position_offset,
-; and turn this back off.
-scan_offsets = false
-; Pop a "Death #n" toast when you die (the counter still increments either way).
-death_toast = false
-; Speedrun panel starting position (px from top-left); still draggable via F11.
-panel_x = 12
-panel_y = 12
-; Panel background opacity 0..1, and text/size scale (1.0 = normal).
-bg_alpha = 0.35
-scale = 1.0
-; Hex offset of the player health int within the player struct (Cheat Engine:
-; scan health, "what accesses"), e.g. 0x1F4. Empty = death counter disabled.
-health_offset = 0x210
-; Include run time / deaths in the end-of-game report.
-timer_in_report = true
+[radiation_ambient]
+; =========================== AMBIENT RADIATION ==========================
+; Map-wide random radiation baseline, applied everywhere the player is NOT inside
+; a [radiation_zones] volume. For maps that are radioactive all over.
+;   <map_fragment> = <base 0..1> [variance 0..1]
+;   base      center grain for every photo on the map
+;   variance  optional random swing: each photo picks base +/- variance (0..1)
+; Precedence: inside a zone -> zone wins; outside -> this ambient; zone-map with no
+; ambient entry -> clean outside its zones.
+roof = 0.35 0.3
+wasteland = 0.8 0.2
+bunker = 0.2 0.15
 
-; ===== Health bar (debug) =====
-[health]
-; Max Payne-style silhouette that fills green->red with the player's health,
-; read at [speedrun] health_offset. Debug/testing feature.
-show_bar = false
-; Health value treated as full (100%).
-max = 100
-; true = vertical gradient inside the fill (liquid look), false = flat colour.
-fill_gradient = true
-; Silhouette height in pixels when the SVG art loads. Drop ANY .svg (name
-; ignored) next to the game exe to override the embedded Mark silhouette.
-bar_px = 110
-; true = no window background panel behind the silhouette.
-no_background = false
-; Draw the HP number under the silhouette.
-show_hp = true
-; Fill colour R,G,B (0-255) at full health. Default = INFRA mushroom green.
-fill_full = 95,225,110
-; Fill colour R,G,B at low health (fill lerps full->low as HP drops).
-fill_low = 220,60,55
-; Colour R,G,B of the drained (unfilled) part of the silhouette.
-empty_color = 38,40,46
-
-; ===== Pickup name table =====
-; Map an object's targetname OR model basename (shown in the verbose pickup log
-; as "model=...") to a friendly label. Case-insensitive. Build this up from the
-; pickup(held) log lines - which now also show "class=..." (the entity class).
-; Quickest way to find an id: bind [hotkeys] dump_held, grab the prop with E,
-; press it, and read the class/name/model line it writes to silta.log.
-; Examples from testing:
-[pickup_names]
-valve_mdl = Orange Valve
-valve_blue_mdl = Blue Valve
-valve_green_mdl = Green Valve
-valve_red_mdl = Red Valve
-fuse_mdl3 = Industrial Fuse
-; generic props are identified by model basename, e.g.:
-; glassbottle01a.mdl = Glass Bottle
+; ================================ SILTA ================================
+;
+;                                                                                             ███
+;                                                                               ███         ██████
+;                                                                              █████        ███████
+;                                                                              ██████        ██████
+;                                                                                            ██████                          █████████
+;                                                                                  █████     ██████                          ██████████████
+;                                                                         ██████   ██████     ██████                         █████████████████
+;                                                                     ███████████   █████     ██████                               ██████████████
+;                                                                 ███████████████   ██████     █████                                     ████████████
+;                                                               ███████████          █████     █████                                     █████████████
+;                                                             ████████               █████     █████      ██████████████████             █████   ██████
+;                                                           ███████                  █████      ████████████████████████████████         █████    ██████
+;                                                          ██████                    █████      ████████████████        ███████████    ███████      ███████
+;                                                          ████████████              █████       ████████                   ███████   ███████        ██████
+;                                                          █████████████████         █████                                     ███    ██████           ██
+;                                                            █████████████████      ██████                                             ███
+;                                                                      ███████        ██                                                        █████████████
+;                                                                        █████                                                                  ████████████████████
+;                                                                      ██████                                                                   ██████████████████████
+;                                                                     ██████                                                                                     ██████
+;                                                                   ███████                                                                             ████       █████
+;                                                                 ███████                                                                              ███████     █████
+;                                                              █████████                                                                                ███████    █████
+;                                                           ██████████                                                                                    ███████  █████
+;                                                         ██████████                                                                                       ███████ █████
+;                                                     ███████████                                                                                            ███   █████
+;                                                  ███████████                                                                                                     █████
+;                                              ███████████                                                                                                         █████
+;                                         █████████████                                                                                                            █████
+;                                      ████████████                                                                                                                █████
+;                                 █████████████                                                                                                                     ████
+;                             █████████████
+;                         ██████████████
+;                     █████████████
+;                ██████████████
+;           █████████████
+;       █████████████
+; ██████████████
+;██████████
+; █████
+;
+;                                                   ___  __          ___  __   __           __   ___ ___           __   __
+;                                           | |\ | |__  |__)  /\      |  /  \ /  \ |    __ /__` |__   |      |\/| /  \ |  \
+;                                           | | \| |    |  \ /~~\     |  \__/ \__/ |___    .__/ |___  |      |  | \__/ |__/ .

@@ -37,6 +37,13 @@ namespace mod {
 		extern unsigned char burnAccent[3]; // caption top-line colour (RGB)
 		extern unsigned char burnText[3];   // caption bottom-line colour (RGB)
 		extern float burnBandAlpha;         // caption band darkness (0=black .. 1=clear)
+		extern int   burnStyle;             // 0 band (classic), 1 plain (no band), 2 minimal (one small line)
+		extern bool  burnTop;               // caption at the top edge instead of the bottom
+		extern int   radNoiseColor;         // 0 bw, 1 rgb sensor confetti, 2 white-only
+		extern int   radNoisePattern;       // 0 speckle (1px), 1 clusters (1-3px blobs), 2 streaks
+		extern bool  radNoiseOverCaption;   // grain also hits the burned-in caption
+		extern bool  radExifCorrupt;        // radiation garbles EXIF field VALUES (dose-scaled)
+		extern float radExifChance;         // multiplier on the corruption probability
 		extern bool  subfolders;   // sort photos into per-site DCIM subfolders
 		extern bool  surveyLog;    // append each photo to DCIM\survey_log.txt
 		extern bool  assetTag;     // include an N.C.G. asset tag in the EXIF

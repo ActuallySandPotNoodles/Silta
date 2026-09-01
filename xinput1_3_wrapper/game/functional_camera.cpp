@@ -49,6 +49,13 @@ bool  mod::functional_camera::originCalibValid = false;
 unsigned char mod::functional_camera::burnAccent[3] = { 255, 235, 150 };
 unsigned char mod::functional_camera::burnText[3]   = { 230, 230, 230 };
 float mod::functional_camera::burnBandAlpha = 0.35f;
+int   mod::functional_camera::burnStyle = 0;
+bool  mod::functional_camera::burnTop = false;
+int   mod::functional_camera::radNoiseColor = 1;
+int   mod::functional_camera::radNoisePattern = 1;
+bool  mod::functional_camera::radNoiseOverCaption = false;
+bool  mod::functional_camera::radExifCorrupt = true;
+float mod::functional_camera::radExifChance = 1.0f;
 bool  mod::functional_camera::subfolders = true;
 bool  mod::functional_camera::surveyLog = true;
 bool  mod::functional_camera::assetTag = true;
@@ -247,31 +254,43 @@ namespace {
 	// slow playthrough still matches the canon timeline.
 	std::string ComputeExifDateTime() {
 		if (!mod::functional_camera::exifDateTimeAuto) return mod::functional_camera::exifDateTime;
-		const char* mn = Engine()->get_map_name();
-		if (!mn) return mod::functional_camera::exifDateTime;
-		std::string m = mn;
-		int ch = 0, mi = 0;
-		size_t p = m.find("_c");
-		if (p != std::string::npos) {
-			size_t i = p + 2;
-			while (i < m.size() && isdigit(static_cast<unsigned char>(m[i]))) { ch = ch * 10 + (m[i] - '0'); ++i; }
+		// Base date/time from config ("YYYY:MM:DD HH:MM:SS").
+		std::string base = mod::functional_camera::exifDateTime;
+		int y = 2016, mo = 8, d = 8;
+		if (base.size() >= 10) {
+			int py = atoi(base.substr(0, 4).c_str());
+			int pm = atoi(base.substr(5, 2).c_str());
+			int pd = atoi(base.substr(8, 2).c_str());
+			if (py >= 1 && pm >= 1 && pd >= 1) { y = py; mo = pm; d = pd; }
 		}
-		size_t q = m.find("_m");
-		if (q != std::string::npos) {
-			size_t i = q + 2;
-			while (i < m.size() && isdigit(static_cast<unsigned char>(m[i]))) { mi = mi * 10 + (m[i] - '0'); ++i; }
+		// Prefer the shared canon table (rolls past midnight); fall back to the old
+		// chapter-number heuristic for maps not in the table.
+		int minutes = overlay::CurrentMapMinutes();
+		if (minutes < 0) {
+			const char* mn = Engine()->get_map_name();
+			if (!mn) return base;
+			std::string m = mn;
+			int ch = 0;
+			size_t p = m.find("_c");
+			if (p != std::string::npos) { size_t i = p + 2; while (i < m.size() && isdigit(static_cast<unsigned char>(m[i]))) { ch = ch * 10 + (m[i] - '0'); ++i; } }
+			static const int kStart[11] = { 0, 480, 600, 720, 840, 930, 1020, 1110, 1200, 1290, 1380 };
+			if (ch < 1 || ch > 10) return base;
+			minutes = kStart[ch];
 		}
-		// Chapter start times in minutes from midnight (canon: ~08:00 -> ~23:00).
-		static const int kStart[11] = { 0, 480, 600, 720, 840, 930, 1020, 1110, 1200, 1290, 1380 };
-		if (ch < 1 || ch > 10) return mod::functional_camera::exifDateTime;
-		int minutes = kStart[ch] + (mi > 0 ? (mi - 1) * 20 : 0);
-		const int next = (ch < 10) ? kStart[ch + 1] : 1435;
-		if (minutes > next - 5) minutes = next - 5; // stay inside the chapter's window
-		char hm[16];
-		sprintf_s(hm, sizeof(hm), "%02d:%02d", minutes / 60, minutes % 60);
-		std::string date = mod::functional_camera::exifDateTime.substr(0, 10); // YYYY:MM:DD
-		if (date.size() < 10) date = "2016:08:08";
-		return date + " " + hm + ":00";
+		// Roll the date by whole days, keep the time-of-day remainder.
+		int dayOff = minutes / 1440;
+		int tod = minutes % 1440;
+		if (dayOff > 0) {
+			static const int dim[12] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+			while (dayOff-- > 0) {
+				int dm = dim[mo - 1];
+				if (mo == 2 && ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)) dm = 29;
+				if (d < dm) { ++d; } else { d = 1; if (++mo > 12) { mo = 1; ++y; } }
+			}
+		}
+		char out[24];
+		sprintf_s(out, sizeof(out), "%04d:%02d:%02d %02d:%02d:00", y, mo, d, tod / 60, tod % 60);
+		return std::string(out);
 	}
 
 	// ---- Minimal EXIF (APP1) builder, little-endian. Validated against piexif. ----
@@ -294,6 +313,59 @@ namespace {
 			else { U32(head, dataPos); data.insert(data.end(), e.data.begin(), e.data.end()); if (data.size() & 1) data.push_back(0); dataPos = ifdStart + entBytes + (unsigned int)data.size(); }
 		}
 		U32(head, nextIFD); head.insert(head.end(), data.begin(), data.end()); return head;
+	}
+	// ----- Radiation EXIF/caption corruption -----
+	// Garbles the VALUES of metadata fields (and, rarely, the burned-in date),
+	// scaled by dose. NEVER touches the image pixels or the JPEG/EXIF structure -
+	// the file always opens; only the recorded data is damaged, as if the sensor
+	// electronics and clock took radiation hits. Fields are worker-local copies.
+	struct CorruptRng { unsigned int s; float f() { s = s * 1664525u + 1013904223u; return static_cast<float>(s >> 8) / static_cast<float>(1u << 24); } };
+	void GarbleString(std::string& str, float frac, CorruptRng& rng) {
+		if (str.empty()) return;
+		int hits = 1 + static_cast<int>(frac * static_cast<float>(str.size()));
+		for (int i = 0; i < hits; ++i) {
+			size_t idx = static_cast<size_t>(rng.f() * static_cast<float>(str.size()));
+			if (idx >= str.size()) idx = str.size() - 1;
+			str[idx] = static_cast<char>(32 + static_cast<int>(rng.f() * 200.0f)); // mojibake byte
+		}
+	}
+	// Returns true if the burned-in caption date should be shown glitched too.
+	bool CorruptExifFields(float dose, std::string& make, std::string& model, std::string& software,
+		std::string& dateTime, std::string& desc, std::string& comment,
+		bool& hasGps, double& lat, double& lon, std::string& glitchedDate) {
+		if (dose <= 0.0f) return false;
+		if (dose > 1.0f) dose = 1.0f;
+		const float mult = (mod::functional_camera::radExifChance > 0.0f) ? mod::functional_camera::radExifChance : 1.0f;
+		CorruptRng rng{ 0x1BADB002u ^ static_cast<unsigned int>(GetTickCount64()) };
+		const float pField = 0.8f * dose * mult;
+		if (rng.f() < pField)        GarbleString(desc, 0.15f + 0.35f * dose, rng);
+		if (rng.f() < pField)        GarbleString(comment, 0.15f + 0.35f * dose, rng);
+		if (rng.f() < pField * 0.6f) GarbleString(make, 0.4f, rng);
+		if (rng.f() < pField * 0.6f) GarbleString(model, 0.4f, rng);
+		if (rng.f() < pField * 0.5f) GarbleString(software, 0.3f, rng);
+		// Timestamp: radiation scrambled the clock -> impossible date, or wiped.
+		if (rng.f() < pField && dateTime.size() >= 19) {
+			if (rng.f() < 0.30f) {
+				dateTime = "0000:00:00 00:00:00";
+			} else {
+				char buf[24]; strncpy_s(buf, sizeof(buf), dateTime.c_str(), _TRUNCATE);
+				buf[5]  = static_cast<char>('0' + 3 + static_cast<int>(rng.f() * 6.0f)); // impossible month tens
+				buf[11] = static_cast<char>('0' + 3 + static_cast<int>(rng.f() * 6.0f)); // impossible hour tens
+				dateTime = buf;
+			}
+		}
+		// GPS: nudge coordinates to nonsense.
+		if (hasGps && rng.f() < pField) {
+			lat += static_cast<double>((rng.f() * 2.0f - 1.0f) * 40.0f);
+			lon += static_cast<double>((rng.f() * 2.0f - 1.0f) * 80.0f);
+		}
+		// RARE: glitch the burned-in caption date too (scaled well below the EXIF
+		// rate so it only shows up occasionally on the photo itself).
+		if (rng.f() < 0.05f * dose * mult && !glitchedDate.empty()) {
+			GarbleString(glitchedDate, 0.5f, rng);
+			return true;
+		}
+		return false;
 	}
 	Bytes BuildExifApp1(const std::string& make, const std::string& model, const std::string& software,
 		const std::string& dateTime, const std::string& desc, const std::string& userComment,
@@ -354,17 +426,84 @@ namespace {
 		fwrite(out.data(), 1, out.size(), g); fclose(g); return true;
 	}
 
+	// Radiation grain: speckles across the BGRA image, density + intensity scaled
+	// by `amount` (0..1). Color mode 0 = black/white film fog; 1 = "sensor
+	// confetti" - saturated R/G/B hot pixels with some white/cyan/magenta, the
+	// look of a Bayer sensor taking hits (see any reactor-core video); 2 = white
+	// only. Pattern 0 = single px; 1 = ~1/4 of hits bloom into 2x2-ish clusters;
+	// 2 = ~1/8 become short streaks (cosmic-ray tracks). Pure CPU, worker-safe;
+	// clock-seeded so every photo differs.
+	void ApplyRadiationGrain(unsigned char* px, int W, int H, float amount, int colorMode, int pattern) {
+		if (px == nullptr || amount <= 0.0f || W <= 0 || H <= 0) return;
+		if (amount > 1.0f) amount = 1.0f;
+		const size_t total = static_cast<size_t>(W) * static_cast<size_t>(H);
+		const float density = 0.08f * amount; // up to ~8% of pixels speckled at full
+		const unsigned int thresh = static_cast<unsigned int>(density * static_cast<float>(1u << 24));
+		unsigned int rng = static_cast<unsigned int>(GetTickCount64()) ^ 0x9E3779B9u;
+		auto put = [&](size_t idx, unsigned char b, unsigned char g, unsigned char r) {
+			unsigned char* p = px + idx * 4;
+			p[0] = b; p[1] = g; p[2] = r; // leave alpha
+		};
+		for (size_t i = 0; i < total; ++i) {
+			rng = rng * 1664525u + 1013904223u;
+			if ((rng >> 8) >= thresh) continue;
+			// pick the speckle color
+			rng = rng * 1664525u + 1013904223u;
+			unsigned char b = 255, g = 255, r = 255;
+			if (colorMode == 0) {           // black / white
+				const unsigned char v = ((rng >> 7) & 1u) ? 255 : 0;
+				b = g = r = v;
+			} else if (colorMode == 2) {    // white only
+				b = g = r = 255;
+			} else {                        // sensor confetti
+				switch ((rng >> 9) & 7u) {
+				case 0: case 1: b = 40;  g = 40;  r = 255; break; // red
+				case 2: case 3: b = 40;  g = 255; r = 40;  break; // green
+				case 4: case 5: b = 255; g = 60;  r = 60;  break; // blue
+				case 6:         b = 255; g = 255; r = 255; break; // white
+				default:
+					if ((rng >> 13) & 1u) { b = 255; g = 255; r = 40; }  // cyan
+					else                  { b = 255; g = 40;  r = 255; } // magenta
+					break;
+				}
+			}
+			const int x = static_cast<int>(i % W), y = static_cast<int>(i / W);
+			put(i, b, g, r);
+			if (pattern == 1) {             // clusters: ~1/4 bloom into a small blob
+				rng = rng * 1664525u + 1013904223u;
+				if (((rng >> 10) & 3u) == 0u) {
+					if (x + 1 < W) put(i + 1, b, g, r);
+					if (y + 1 < H) put(i + W, b, g, r);
+					if (((rng >> 12) & 1u) && x + 1 < W && y + 1 < H) put(i + W + 1, b, g, r);
+				}
+			} else if (pattern == 2) {      // streaks: ~1/8 become a short track
+				rng = rng * 1664525u + 1013904223u;
+				if (((rng >> 10) & 7u) == 0u) {
+					const int len = 3 + static_cast<int>((rng >> 13) & 3u); // 3-6 px
+					const bool horiz = ((rng >> 16) & 1u) != 0;
+					for (int s = 1; s <= len; ++s) {
+						const int sx = x + (horiz ? s : 0), sy = y + (horiz ? 0 : s);
+						if (sx < W && sy < H) put(static_cast<size_t>(sy) * W + sx, b, g, r);
+					}
+				}
+			}
+		}
+	}
+
 	// Stamp the survey caption into a raw BGRA buffer (thread-safe: pure CPU).
 	// loc/date/surveyor are passed in so worker threads never touch overlay state.
 	void BurnInCaptionRaw(unsigned char* pixels, int pitch, int W, int H, const char* photoName,
 		const std::string& locIn, const std::string& date, const std::string& surveyor) {
 		D3DLOCKED_RECT lr; lr.Pitch = pitch; lr.pBits = pixels; // same layout the stampers use
 
+		const int style = mod::functional_camera::burnStyle; // 0 band, 1 plain, 2 minimal
 		const int scale = (W >= 1600) ? 3 : (W >= 900 ? 2 : 1);
 		const int line = 9 * scale;
 		const int pad = 6 * scale;
-		const int bandH = line * 2 + pad * 2;
-		PFDarkenBand(lr, W, H, H - bandH, H, mod::functional_camera::burnBandAlpha);
+		const int rows = (style == 2) ? 1 : 2;
+		const int bandH = line * rows + pad * 2;
+		const int y0 = mod::functional_camera::burnTop ? 0 : (H - bandH);
+		if (style == 0) PFDarkenBand(lr, W, H, y0, y0 + bandH, mod::functional_camera::burnBandAlpha);
 
 		std::string loc = locIn.empty() ? std::string("STALBURG") : locIn;
 		for (char& c : loc) c = static_cast<char>(toupper(static_cast<unsigned char>(c)));
@@ -373,8 +512,19 @@ namespace {
 
 		const unsigned char* ac = mod::functional_camera::burnAccent;
 		const unsigned char* tc = mod::functional_camera::burnText;
-		PFStamp(lr, W, H, pad, H - bandH + pad, scale, top.c_str(), ac[0], ac[1], ac[2]);
-		PFStamp(lr, W, H, pad, H - bandH + pad + line, scale, bot.c_str(), tc[0], tc[1], tc[2]);
+		// Without the band, give the text a 1px drop shadow so it survives bright shots.
+		auto stampS = [&](int x, int y, const char* s, unsigned char r, unsigned char g, unsigned char b) {
+			if (style != 0) PFStamp(lr, W, H, x + 1 * scale, y + 1 * scale, scale, s, 10, 10, 10);
+			PFStamp(lr, W, H, x, y, scale, s, r, g, b);
+		};
+		if (style == 2) {
+			// Minimal: a single quiet line - "<name>   <date>".
+			const std::string one = std::string(photoName ? photoName : "") + "   " + date;
+			stampS(pad, y0 + pad, one.c_str(), tc[0], tc[1], tc[2]);
+		} else {
+			stampS(pad, y0 + pad, top.c_str(), ac[0], ac[1], ac[2]);
+			stampS(pad, y0 + pad + line, bot.c_str(), tc[0], tc[1], tc[2]);
+		}
 	}
 
 	// Legacy surface path (sync fallback when the fast buffer path can't run).
@@ -590,7 +740,7 @@ static void StretchAndSaveCameraImage(LPDIRECT3DDEVICE9 dev, IDirect3DSurface9* 
 				const std::string assetTagStr = "NCG-" + PhotoSubdirToken() + "-" + nname;
 				const std::string exifDT = ComputeExifDateTime();     // reads map name: game thread only
 				const std::string surveyor = overlay::surveyorName;
-				const std::string sdate = overlay::surveyDate;
+				const std::string sdate = overlay::InLoreSurveyDate();
 				float ox = 0.0f, oy = 0.0f, oz = 0.0f;
 				const bool hasOrigin = ReadPlayerOrigin(ox, oy, oz);  // touches the entity: game thread only
 				const bool doBurn = mod::functional_camera::burnIn;
@@ -606,6 +756,11 @@ static void StretchAndSaveCameraImage(LPDIRECT3DDEVICE9 dev, IDirect3DSurface9* 
 				std::string exSoft = mod::functional_camera::exifSoftware;
 				if (exSoft.empty()) exSoft = std::string(overlay::kModName) + " v" + overlay::kVersion;
 				const int W = outWidth, H = outHeight;
+				const float radNoise = overlay::PhotoRadiationNoise(); // game-thread read of geiger/map state
+				const int  radColor = mod::functional_camera::radNoiseColor;
+				const int  radPattern = mod::functional_camera::radNoisePattern;
+				const bool radOver = mod::functional_camera::radNoiseOverCaption;
+				const bool radExifCorrupt = mod::functional_camera::radExifCorrupt;
 
 				g_SessionPhotos.push_back(path);
 				if (mod::functional_camera::saveToast && mod::functional_camera::toastSeconds > 0.0f) {
@@ -614,9 +769,41 @@ static void StretchAndSaveCameraImage(LPDIRECT3DDEVICE9 dev, IDirect3DSurface9* 
 
 				std::thread([pix = std::move(pixels), wpath, nname, loc, assetTagStr, exifDT, surveyor, sdate,
 					exMake, exModel, exSoft,
-					doBurn, png, doExif, doLog, wantTag, wantGps, gLat0, gLon0, gUnits, hasOrigin, ox, oy, oz, W, H]() mutable {
+					doBurn, png, doExif, doLog, wantTag, wantGps, gLat0, gLon0, gUnits, hasOrigin, ox, oy, oz, W, H, radNoise, radColor, radPattern, radOver, radExifCorrupt]() mutable {
+					// Build the EXIF text fields up front so radiation can garble their
+					// VALUES (and, rarely, the burned-in date) before anything is drawn.
+					std::string exMakeC = exMake, exModelC = exModel, exSoftC = exSoft, exifDTc = exifDT;
+					std::string desc, comment; bool hasGps = false; double lat = 0.0, lon = 0.0;
+					if (doExif) {
+						desc = "N.C.G. structural survey - " + loc;
+						if (wantTag) desc += " [" + assetTagStr + "]";
+						comment = "Surveyor: " + surveyor + "; Site: " + loc;
+						if (hasOrigin) {
+							char c[128];
+							sprintf_s(c, sizeof(c), "; pos X=%.1f Y=%.1f Z=%.1f", ox, oy, oz);
+							comment += c;
+							if (wantGps && gUnits != 0.0) { lat = gLat0 + oy / gUnits; lon = gLon0 + ox / gUnits; hasGps = true; }
+						}
+					}
+					std::string sdateUse = sdate;
+					if (radExifCorrupt && radNoise > 0.0f) {
+						std::string gdate = sdate;
+						if (CorruptExifFields(radNoise, exMakeC, exModelC, exSoftC, exifDTc, desc, comment, hasGps, lat, lon, gdate)) {
+							sdateUse = gdate; // rare: the stamped date on the photo itself is glitched
+						}
+					}
+					// Always grain BEFORE the caption (this is the pass that's known to
+					// work). radiation_noise_over_caption then ADDS a second pass AFTER
+					// the caption so the stamp gets hit too - additive, so 'over' can
+					// never remove the base grain.
+					if (radNoise > 0.0f) {
+						ApplyRadiationGrain(pix.data(), W, H, radNoise, radColor, radPattern);
+					}
 					if (doBurn) {
-						BurnInCaptionRaw(pix.data(), W * 4, W, H, nname.c_str(), loc, sdate, surveyor);
+						BurnInCaptionRaw(pix.data(), W * 4, W, H, nname.c_str(), loc, sdateUse, surveyor);
+					}
+					if (radOver && radNoise > 0.0f) {
+						ApplyRadiationGrain(pix.data(), W, H, radNoise, radColor, radPattern);
 					}
 					const bool ok = GdipEncodeToFile(wpath, pix.data(), W, H, W * 4, png);
 					if (!ok) {
@@ -625,22 +812,7 @@ static void StretchAndSaveCameraImage(LPDIRECT3DDEVICE9 dev, IDirect3DSurface9* 
 					}
 					LogV("camera: worker encoded " + nname);
 					if (doExif) {
-						std::string desc = "N.C.G. structural survey - " + loc;
-						if (wantTag) desc += " [" + assetTagStr + "]";
-						std::string comment = "Surveyor: " + surveyor + "; Site: " + loc;
-						bool hasGps = false; double lat = 0.0, lon = 0.0;
-						if (hasOrigin) {
-							char c[128];
-							sprintf_s(c, sizeof(c), "; pos X=%.1f Y=%.1f Z=%.1f", ox, oy, oz);
-							comment += c;
-							if (wantGps && gUnits != 0.0) {
-								lat = gLat0 + oy / gUnits;
-								lon = gLon0 + ox / gUnits;
-								hasGps = true;
-							}
-						}
-						Bytes app1 = BuildExifApp1(exMake.c_str(), exModel.c_str(),
-							exSoft.c_str(), exifDT, desc, comment, hasGps, lat, lon);
+						Bytes app1 = BuildExifApp1(exMakeC, exModelC, exSoftC, exifDTc, desc, comment, hasGps, lat, lon);
 						InsertExifFile(wpath.c_str(), app1);
 					}
 					if (doLog) {
