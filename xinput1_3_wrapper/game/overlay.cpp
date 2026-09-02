@@ -3492,11 +3492,18 @@ void overlay::DispatchHotkey(int vk) {
 // Fallback input path: poll the hotkeys with GetAsyncKeyState from the render
 // thread. Some systems / display modes never deliver WM_KEYDOWN to the overlay
 // (the verbose log shows zero "hotkey: keydown" lines) even though EndScene runs
-// fine - this makes the binds work there. Only polls when the game window is in
-// the foreground, so it can't fire while alt-tabbed out.
+// fine - this makes the binds work there. Only polls while a window owned by the
+// game process is in the foreground, so it can't fire while alt-tabbed out.
 void overlay::PollHotkeys() {
 	HWND gw = Base::Data::hWindow;
-	if (gw != nullptr && GetForegroundWindow() != gw) return;
+	if (gw != nullptr) {
+		HWND fg = GetForegroundWindow();
+		if (fg != gw) {
+			DWORD fgPid = 0;
+			GetWindowThreadProcessId(fg, &fgPid);
+			if (fgPid != GetCurrentProcessId()) return;
+		}
+	}
 
 	static bool prev[256] = { false };
 	auto edge = [&](int vk) -> bool {

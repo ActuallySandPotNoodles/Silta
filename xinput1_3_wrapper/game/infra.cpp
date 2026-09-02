@@ -2761,9 +2761,18 @@ bool GetD3D9Device(void** pTable, const size_t Size) {
 		}
 
 		memcpy(pTable, *reinterpret_cast<void***>(dev), Size * sizeof(void*));
+
+		// Find the D3D window rather than rely on EnumWindows which may provide an
+		// overlay (like Steam) rather than the game window
+		D3DDEVICE_CREATION_PARAMETERS cp = {};
+		if (SUCCEEDED(dev->GetCreationParameters(&cp)) && cp.hFocusWindow != nullptr) {
+			Base::Data::hWindow = cp.hFocusWindow;
+		} else {
+			// Fall back to the original detection if the game window isn't detected
+			GetProcessWindow();
+		}
 		break;
 	}
 
-	GetProcessWindow();
-	return true;
+	return Base::Data::hWindow != nullptr;
 }
